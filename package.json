@@ -1,0 +1,12 @@
+{
+  "name": "bitmap2vector",
+  "version": "1.0.0",
+  "description": "位图转矢量图工具 - 浏览器端处理",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  }
+}

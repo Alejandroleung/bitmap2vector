@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+tunnel_url.txt
+cli_messages.json
+connect.ps1
+monitor.ps1
+tunnel.ps1
