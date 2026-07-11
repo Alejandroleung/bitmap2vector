@@ -1640,8 +1640,9 @@ async function loadUpscalerDeps(){
     s.src=src; s.onload=resolve; s.onerror=reject;
     document.head.appendChild(s);
   });
-  // tfjs 必须先加载（优先 npmmirror 镜像，国内可访问）
+  // tfjs 必须先加载（jsdmirror 是 jsDelivr 国内镜像，带 CORS）
   const tfjsUrls=[
+    "https://cdn.jsdmirror.com/npm/@tensorflow/tfjs@4.11.0/dist/tf.min.js",
     "https://cdn.npmmirror.com/packages/@tensorflow/tfjs/4.11.0/files/dist/tf.min.js",
     "https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.11.0/dist/tf.min.js",
     "https://unpkg.com/@tensorflow/tfjs@4.11.0/dist/tf.min.js",
@@ -1652,6 +1653,7 @@ async function loadUpscalerDeps(){
   }
   if(!loaded) throw new Error("无法加载 TensorFlow.js，请检查网络");
   const upscalerUrls=[
+    "https://cdn.jsdmirror.com/npm/upscaler@1.0.0-beta.19/dist/browser/umd/upscaler.min.js",
     "https://cdn.npmmirror.com/packages/upscaler/1.0.0-beta.19/files/dist/browser/umd/upscaler.min.js",
     "https://cdn.jsdelivr.net/npm/upscaler@1.0.0-beta.19/dist/browser/umd/upscaler.min.js",
     "https://unpkg.com/upscaler@1.0.0-beta.19/dist/browser/umd/upscaler.min.js",
@@ -1678,6 +1680,7 @@ upscaleBtn.addEventListener("click",async()=>{
     const factor=parseInt(upscaleFactor.value)||4;
     if(!upscalerInstance){
       const modelUrls=[
+        "https://cdn.jsdmirror.com/npm/@upscalerjs/default-model@1.0.0-beta.17/models/model.json",
         "https://cdn.npmmirror.com/packages/@upscalerjs/default-model/1.0.0-beta.17/files/models/model.json",
         "https://cdn.jsdelivr.net/npm/@upscalerjs/default-model@1.0.0-beta.17/models/model.json",
         "https://unpkg.com/@upscalerjs/default-model@1.0.0-beta.17/models/model.json",
