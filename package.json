@@ -7,6 +7,9 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.21.0"
+    "@tensorflow/tfjs": "^4.11.0",
+    "@upscalerjs/default-model": "^1.0.0-beta.17",
+    "express": "^4.21.0",
+    "upscaler": "^1.0.0-beta.19"
   }
 }

@@ -1641,23 +1641,25 @@ async function loadUpscalerDeps(){
     document.head.appendChild(s);
   });
   // tfjs 必须先加载（jsdmirror 是 jsDelivr 国内镜像，带 CORS）
-  const tfjsUrls=[
-    "https://cdn.jsdmirror.com/npm/@tensorflow/tfjs@4.11.0/dist/tf.min.js",
-    "https://cdn.npmmirror.com/packages/@tensorflow/tfjs/4.11.0/files/dist/tf.min.js",
-    "https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.11.0/dist/tf.min.js",
-    "https://unpkg.com/@tensorflow/tfjs@4.11.0/dist/tf.min.js",
-  ];
+          const tfjsUrls=[
+            "/local-tfjs/tf.min.js",
+            "https://cdn.jsdmirror.com/npm/@tensorflow/tfjs@4.11.0/dist/tf.min.js",
+            "https://cdn.npmmirror.com/packages/@tensorflow/tfjs/4.11.0/files/dist/tf.min.js",
+            "https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.11.0/dist/tf.min.js",
+            "https://unpkg.com/@tensorflow/tfjs@4.11.0/dist/tf.min.js",
+          ];
   let loaded=false;
   for(const url of tfjsUrls){
     try{ await loadScript(url); loaded=true; break; }catch(e){ /* try next */ }
   }
   if(!loaded) throw new Error("无法加载 TensorFlow.js，请检查网络");
-  const upscalerUrls=[
-    "https://cdn.jsdmirror.com/npm/upscaler@1.0.0-beta.19/dist/browser/umd/upscaler.min.js",
-    "https://cdn.npmmirror.com/packages/upscaler/1.0.0-beta.19/files/dist/browser/umd/upscaler.min.js",
-    "https://cdn.jsdelivr.net/npm/upscaler@1.0.0-beta.19/dist/browser/umd/upscaler.min.js",
-    "https://unpkg.com/upscaler@1.0.0-beta.19/dist/browser/umd/upscaler.min.js",
-  ];
+    const upscalerUrls=[
+      "/local-upscaler/upscaler.min.js",
+      "https://cdn.jsdmirror.com/npm/upscaler@1.0.0-beta.19/dist/browser/umd/upscaler.min.js",
+      "https://cdn.npmmirror.com/packages/upscaler/1.0.0-beta.19/files/dist/browser/umd/upscaler.min.js",
+      "https://cdn.jsdelivr.net/npm/upscaler@1.0.0-beta.19/dist/browser/umd/upscaler.min.js",
+      "https://unpkg.com/upscaler@1.0.0-beta.19/dist/browser/umd/upscaler.min.js",
+    ];
   for(const url of upscalerUrls){
     try{ await loadScript(url); return; }catch(e){ /* try next */ }
   }
@@ -1679,18 +1681,28 @@ upscaleBtn.addEventListener("click",async()=>{
     setStatus("模型加载完成，正在放大...","info");
     const factor=parseInt(upscaleFactor.value)||4;
     if(!upscalerInstance){
-      const modelUrls=[
-        "https://cdn.jsdmirror.com/npm/@upscalerjs/default-model@1.0.0-beta.17/models/model.json",
-        "https://cdn.npmmirror.com/packages/@upscalerjs/default-model/1.0.0-beta.17/files/models/model.json",
-        "https://cdn.jsdelivr.net/npm/@upscalerjs/default-model@1.0.0-beta.17/models/model.json",
-        "https://unpkg.com/@upscalerjs/default-model@1.0.0-beta.17/models/model.json",
-      ];
-      let model=null;
+          const modelUrls=[
+            "/local-models/model.json",
+            "https://cdn.jsdmirror.com/npm/@upscalerjs/default-model@1.0.0-beta.17/models/model.json",
+            "https://cdn.npmmirror.com/packages/@upscalerjs/default-model/1.0.0-beta.17/files/models/model.json",
+            "https://cdn.jsdelivr.net/npm/@upscalerjs/default-model@1.0.0-beta.17/models/model.json",
+            "https://unpkg.com/@upscalerjs/default-model@1.0.0-beta.17/models/model.json",
+          ];
+      let modelPath=null;
       for(const url of modelUrls){
-        try{ model=await tf.loadGraphModel(url); break; }catch(e){ /* try next */ }
+        try{
+          const resp=await fetch(url,{method:"HEAD"});
+          if(resp.ok){ modelPath=url; break; }
+        }catch(e){ /* try next */ }
       }
-      if(!model) throw new Error("无法下载 AI 放大模型，请检查网络或稍后重试");
-      upscalerInstance=new window.Upscaler({model});
+      if(!modelPath) throw new Error("无法下载 AI 放大模型，请检查网络或稍后重试");
+      upscalerInstance=new window.Upscaler({
+        model: {
+          path: modelPath,
+          scale: factor,
+          modelType: "layers",
+        },
+      });
     }
     upscaleProgressBar.style.width="50%";
     const r=new FileReader();
