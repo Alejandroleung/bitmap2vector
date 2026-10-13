@@ -1767,6 +1767,21 @@ function buildEmbeddedModelDef(){
   }catch(e){ return null; }
 }
 
+// 检测图片是否含有透明像素（ESRGAN 不支持透明，透明区输出会变黑）
+function hasTransparentPixels(img){
+  try{
+    const c=document.createElement("canvas");
+    const w=Math.min(img.naturalWidth||img.width||1,256);
+    const h=Math.min(img.naturalHeight||img.height||1,256);
+    c.width=w;c.height=h;
+    const x=c.getContext("2d",{willReadFrequently:true});
+    x.drawImage(img,0,0,w,h);
+    const d=x.getImageData(0,0,w,h).data;
+    for(let i=3;i<d.length;i+=4){ if(d[i]<250) return true; }
+    return false;
+  }catch(e){ return false; }
+}
+
 async function loadEmbeddedModelData(){
   if(window.__BTV_MODEL_DATA) return true;
   try{
@@ -1829,6 +1844,15 @@ upscaleBtn.addEventListener("click",async()=>{
     const r=new FileReader();
     let du=await new Promise(rl=>{r.onload=()=>rl(r.result);r.readAsDataURL(currentFile)});
     let img=await new Promise((rl,rj)=>{const i=new Image;i.onload=()=>rl(i);i.onerror=rj;i.src=du});
+    // ESRGAN 模型不支持透明通道：透明像素 RGB=0，直接喂进去输出会变黑。
+    // 先把图铺到白底上再放大（透明区域变白，符合印刷场景）。
+    if(hasTransparentPixels(img)){
+      const fc=document.createElement("canvas");fc.width=img.naturalWidth;fc.height=img.naturalHeight;
+      const fx=fc.getContext("2d");
+      fx.fillStyle="#FFFFFF";fx.fillRect(0,0,fc.width,fc.height);
+      fx.drawImage(img,0,0);
+      img=fc;
+    }
     upscaleProgressBar.style.width="60%";
     let result;
     try{
@@ -1856,21 +1880,34 @@ upscaleBtn.addEventListener("click",async()=>{
     currentImgDataUrl=result;
     const resultImg=new Image();
     resultImg.onload=()=>{
-      currentFile=new File([resultImg.src],"upscaled.png",{type:"image/png"});
+      // 把 data URL 正确转成二进制 File（直接把字符串塞进 File 会存成文本，
+      // 之后 FileReader 读出来不是图片，"转换"必然失败）
+      try{
+        const parts=result.split(",");
+        const mime=(parts[0].match(/data:(.*?);/)||[])[1]||"image/png";
+        const bin=atob(parts[1]);
+        const u8=new Uint8Array(bin.length);
+        for(let i=0;i<bin.length;i++)u8[i]=bin.charCodeAt(i);
+        currentFile=new File([u8],"upscaled.png",{type:mime});
+      }catch(e){
+        currentFile=null;
+      }
       showPreview(originalPreview,result,"img");
       zoomControls.style.display="flex"; zoomRange.value=100; updateZoom(100);
-      convertBtn.disabled=false; aiBtn.disabled=false;
-      svgPreview.innerHTML='<span class="placeholder">转换后显示矢量图</span><canvas id="svgEditorCanvas"></canvas>';
+      svgPreview.innerHTML='<span class="placeholder">正在重新转换放大后的图...</span><canvas id="svgEditorCanvas"></canvas>';
       editorCanvas=$("svgEditorCanvas");
       svgMeta.style.display="none"; downloadBtn.disabled=true; cmykBtn.disabled=true;
       editorPanel.classList.remove("show");
       svgZoomControls.style.display="none"; paletteSection.style.display="none";
       drawHistory=[];
       upscaleProgressBar.style.width="100%";
-      setStatus(`AI 放大完成！${factor}× (${resultImg.width}×${resultImg.height}px)`,"success");
+      setStatus(`AI 放大完成！${factor}× (${resultImg.width}×${resultImg.height}px)，正在自动转换矢量图...`,"success");
       upscaleBtn.innerHTML=origText;
       upscaleBtn.disabled=false;
+      convertBtn.disabled=false; aiBtn.disabled=false;
       setTimeout(()=>{upscaleProgress.style.display="none";upscaleOptions.style.display="none"},2000);
+      // 自动重跑矢量转换，让右侧直接显示放大后的矢量结果
+      if(currentFile){ try{ doConvert(); }catch(e){} }
     };
     resultImg.src=result;
   }catch(err){
