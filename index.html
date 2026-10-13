@@ -919,6 +919,11 @@ function handleFile(file){
     // 透明像素 RGB=0 会在转换/放大后输出成黑色。上传时统一铺白底。
     try{
       const img=await new Promise((rl,rj)=>{const i=new Image;i.onload=()=>rl(i);i.onerror=rj;i.src=du});
+      // 浏览器渲染管线自检：canvas 读写全黑 = 硬件加速故障或插件冲突
+      if(!canvasSanityCheck()){
+        setStatus("检测到浏览器画布渲染异常（画面全黑常见于硬件加速故障或浏览器插件冲突）。请尝试：① 无痕窗口打开本站 ② 关闭 Edge 硬件加速后重启浏览器","error");
+        return;
+      }
       if(hasTransparentPixels(img)){
         const fc=document.createElement("canvas");fc.width=img.naturalWidth;fc.height=img.naturalHeight;
         const fx=fc.getContext("2d");
@@ -1087,6 +1092,20 @@ async function doConvert(){
     const cx=c.getContext("2d");cx.drawImage(img,0,0);
 
     const imgData=cx.getImageData(0,0,c.width,c.height);
+    // 全黑检测：若解码结果 100% 纯黑且画布自检也异常，说明是浏览器渲染故障而非图片本身
+    {
+      let allBlack=true;
+      const dd=imgData.data;
+      for(let k=0;k<dd.length;k+=4){ if(dd[k]>8||dd[k+1]>8||dd[k+2]>8){allBlack=false;break} }
+      if(allBlack){
+        if(!canvasSanityCheck()){
+          setStatus("转换中止：浏览器画布渲染异常（读到全黑画面）。请用无痕窗口测试，或在 edge://settings 系统 里关闭硬件加速后重启浏览器","error");
+          convertBtn.disabled=false;
+          return;
+        }
+        setStatus("提示：图片解码结果为全黑（图片本身可能就是全黑内容），仍按原图转换","info");
+      }
+    }
     const denoise=+$("denoise").value;
     const smooth=+$("smooth").value;
     const sharpen=+$("sharpen").value;
@@ -1803,6 +1822,18 @@ function hasTransparentPixels(img){
     const d=x.getImageData(0,0,w,h).data;
     for(let i=3;i<d.length;i+=4){ if(d[i]<250) return true; }
     return false;
+  }catch(e){ return false; }
+}
+
+// 画布自检：硬件加速故障或浏览器插件冲突时，canvas 读写会全部变黑。
+// 画一个纯红色块再读回来，读不到红色就说明渲染管线异常，给用户明确指引。
+function canvasSanityCheck(){
+  try{
+    const c=document.createElement("canvas");c.width=8;c.height=8;
+    const x=c.getContext("2d",{willReadFrequently:true});
+    x.fillStyle="#FF0000";x.fillRect(0,0,8,8);
+    const d=x.getImageData(0,0,8,8).data;
+    return d[0]>200 && d[1]<60 && d[2]<60;
   }catch(e){ return false; }
 }
 
