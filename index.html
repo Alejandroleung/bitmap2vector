@@ -1714,12 +1714,14 @@ async function loadUpscalerDeps(){
     s.src=src; s.onload=resolve; s.onerror=reject;
     document.head.appendChild(s);
   });
-  // tfjs 必须先加载（jsdmirror 是 jsDelivr 国内镜像，带 CORS）
+  // tfjs 必须先加载；优先同源 /vendor/（本站自带，GitHub Pages 与本地服务均可直接用），
+  // 失败再依次尝试 CDN（jsdmirror 是 jsDelivr 国内镜像，带 CORS；npmmirror 无 CORS 头已剔除）
           const tfjsUrls=[
+            "/vendor/tf.min.js",
             "/local-tfjs/tf.min.js",
             "https://cdn.jsdmirror.com/npm/@tensorflow/tfjs@4.11.0/dist/tf.min.js",
-            "https://cdn.npmmirror.com/packages/@tensorflow/tfjs/4.11.0/files/dist/tf.min.js",
             "https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.11.0/dist/tf.min.js",
+            "https://fastly.jsdelivr.net/npm/@tensorflow/tfjs@4.11.0/dist/tf.min.js",
             "https://unpkg.com/@tensorflow/tfjs@4.11.0/dist/tf.min.js",
           ];
   let loaded=false;
@@ -1728,10 +1730,11 @@ async function loadUpscalerDeps(){
   }
   if(!loaded) throw new Error("无法加载 TensorFlow.js，请检查网络");
     const upscalerUrls=[
+      "/vendor/upscaler.min.js",
       "/local-upscaler/upscaler.min.js",
       "https://cdn.jsdmirror.com/npm/upscaler@1.0.0-beta.19/dist/browser/umd/upscaler.min.js",
-      "https://cdn.npmmirror.com/packages/upscaler/1.0.0-beta.19/files/dist/browser/umd/upscaler.min.js",
       "https://cdn.jsdelivr.net/npm/upscaler@1.0.0-beta.19/dist/browser/umd/upscaler.min.js",
+      "https://fastly.jsdelivr.net/npm/upscaler@1.0.0-beta.19/dist/browser/umd/upscaler.min.js",
       "https://unpkg.com/upscaler@1.0.0-beta.19/dist/browser/umd/upscaler.min.js",
     ];
   for(const url of upscalerUrls){
@@ -1748,42 +1751,51 @@ upscaleBtn.addEventListener("click",async()=>{
   upscaleOptions.style.display="flex";
   upscaleProgress.style.display="block";
   upscaleProgressBar.style.width="0%";
-  setStatus("正在加载 AI 放大模型（首次需下载约10MB）...","info");
+  setStatus("正在加载 AI 放大模型（约 2.3MB，已内置本站，一般无需外网）...","info");
   try{
     await loadUpscalerDeps();
     upscaleProgressBar.style.width="30%";
     setStatus("模型加载完成，正在放大...","info");
-    const factor=parseInt(upscaleFactor.value)||4;
+    const factor=parseInt(upscaleFactor.value)||2;
     if(!upscalerInstance){
           const modelUrls=[
+            "/vendor/model.json",
             "/local-models/model.json",
             "https://cdn.jsdmirror.com/npm/@upscalerjs/default-model@1.0.0-beta.17/models/model.json",
-            "https://cdn.npmmirror.com/packages/@upscalerjs/default-model/1.0.0-beta.17/files/models/model.json",
             "https://cdn.jsdelivr.net/npm/@upscalerjs/default-model@1.0.0-beta.17/models/model.json",
+            "https://fastly.jsdelivr.net/npm/@upscalerjs/default-model@1.0.0-beta.17/models/model.json",
             "https://unpkg.com/@upscalerjs/default-model@1.0.0-beta.17/models/model.json",
           ];
       let modelPath=null;
       for(const url of modelUrls){
         try{
-          const resp=await fetch(url,{method:"HEAD"});
+          // 用 GET 探测（部分代理/插件会拦 HEAD），同源 /vendor/ 命中即走本站
+          const resp=await fetch(url,{method:"GET",cache:"no-store"});
           if(resp.ok){ modelPath=url; break; }
         }catch(e){ /* try next */ }
       }
-      if(!modelPath) throw new Error("无法下载 AI 放大模型，请检查网络或稍后重试");
+      if(!modelPath) throw new Error("无法下载 AI 放大模型（本站与 5 个 CDN 源均不可达）");
       upscalerInstance=new window.Upscaler({
         model: {
           path: modelPath,
-          scale: factor,
+          scale: 2,   // 该 ESRGAN 模型原生 2×（UpSampling2D size=2），固定传 2
           modelType: "layers",
         },
       });
     }
     upscaleProgressBar.style.width="50%";
     const r=new FileReader();
-    const du=await new Promise(rl=>{r.onload=()=>rl(r.result);r.readAsDataURL(currentFile)});
-    const img=await new Promise((rl,rj)=>{const i=new Image;i.onload=()=>rl(i);i.onerror=rj;i.src=du});
+    let du=await new Promise(rl=>{r.onload=()=>rl(r.result);r.readAsDataURL(currentFile)});
+    let img=await new Promise((rl,rj)=>{const i=new Image;i.onload=()=>rl(i);i.onerror=rj;i.src=du});
     upscaleProgressBar.style.width="60%";
-    const result=await upscalerInstance.upscale(img,{output:'base64'});
+    let result=await upscalerInstance.upscale(img,{output:'base64'});
+    if(factor>=4){
+      // 模型原生 2×：4× 需要连续跑两遍（第二遍吃第一遍的输出）
+      setStatus("2× 完成，正在第二遍放大到 4×...","info");
+      upscaleProgressBar.style.width="75%";
+      const img2=await new Promise((rl,rj)=>{const i=new Image;i.onload=()=>rl(i);i.onerror=rj;i.src=result});
+      result=await upscalerInstance.upscale(img2,{output:'base64'});
+    }
     upscaleProgressBar.style.width="90%";
     currentImgDataUrl=result;
     const resultImg=new Image();
