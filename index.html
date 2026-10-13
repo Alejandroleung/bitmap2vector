@@ -912,8 +912,32 @@ function handleFile(file){
   if(!file.type.startsWith("image/")){setStatus("请上传图片文件","error");return}
   currentFile=file;
   const r=new FileReader();
-  r.onload=e=>{
-    currentImgDataUrl=e.target.result;
+  r.onload=async e=>{
+    let du=e.target.result;
+    let flattened=false;
+    // 全局透明处理：ImageTracer 与 ESRGAN 都不支持透明通道，
+    // 透明像素 RGB=0 会在转换/放大后输出成黑色。上传时统一铺白底。
+    try{
+      const img=await new Promise((rl,rj)=>{const i=new Image;i.onload=()=>rl(i);i.onerror=rj;i.src=du});
+      if(hasTransparentPixels(img)){
+        const fc=document.createElement("canvas");fc.width=img.naturalWidth;fc.height=img.naturalHeight;
+        const fx=fc.getContext("2d");
+        fx.fillStyle="#FFFFFF";fx.fillRect(0,0,fc.width,fc.height);
+        fx.drawImage(img,0,0);
+        du=fc.toDataURL("image/png");
+        try{
+          const parts=du.split(",");
+          const bin=atob(parts[1]);
+          const u8=new Uint8Array(bin.length);
+          for(let i=0;i<bin.length;i++)u8[i]=bin.charCodeAt(i);
+          const base=(file.name||"image").replace(/\.[^.]*$/,"");
+          currentFile=new File([u8],base+"-白底.png",{type:"image/png"});
+          flattened=true;
+        }catch(e2){}
+        setStatus("已加载: 检测到透明背景，已自动铺白底处理","info");
+      }
+    }catch(e1){}
+    currentImgDataUrl=du;
     showPreview(originalPreview,currentImgDataUrl,"img");
     convertBtn.disabled=false; aiBtn.disabled=false; upscaleBtn.disabled=false;
     zoomControls.style.display="flex"; zoomRange.value=100; updateZoom(100);
@@ -922,7 +946,7 @@ function handleFile(file){
     svgMeta.style.display="none"; downloadBtn.disabled=true; cmykBtn.disabled=true; editorPanel.classList.remove("show");
     svgZoomControls.style.display="none"; paletteSection.style.display="none";
     drawHistory=[];
-    setStatus(`已加载: ${file.name} (${(file.size/1024).toFixed(1)} KB)`,"info");
+    if(!flattened) setStatus(`已加载: ${file.name} (${(file.size/1024).toFixed(1)} KB)`,"info");
   };
   r.readAsDataURL(file);
 }

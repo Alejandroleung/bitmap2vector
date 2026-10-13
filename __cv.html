@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>convert alpha test</title></head>
+<body>
+<iframe id="site" src="index.html" style="width:1400px;height:700px;border:1px solid #ccc"></iframe>
+<pre id="log">boot...</pre>
+<script>
+const log=[];
+function p(s){ log.push(s); document.getElementById('log').textContent=log.join('\n'); }
+function makeAlphaPNG(w,h){
+  const c=document.createElement('canvas'); c.width=w; c.height=h;
+  const x=c.getContext('2d');
+  x.clearRect(0,0,w,h);
+  x.fillStyle='rgb(200,30,30)'; x.fillRect(0,0,w/2,h);
+  return c.toDataURL('image/png');
+}
+function dataURLtoBlob(u){
+  const [h,b64]=u.split(','); const bin=atob(b64); const u8=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++)u8[i]=bin.charCodeAt(i);
+  return new Blob([u8],{type:h.match(/:(.*?);/)[1]});
+}
+window.addEventListener('load',async()=>{
+  p('start');
+  const w=document.getElementById('site').contentWindow;
+  const doc=w.document;
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  for(let t=0;t<200;t++){ if(w.window&&w.window.Image)break; await wait(50); }
+  await wait(800);
+  try{
+    // 1) 上传透明 PNG
+    const f=dataURLtoBlob(makeAlphaPNG(120,90));
+    const inp=doc.getElementById('fileInput');
+    const d=new w.DataTransfer(); d.items.add(new w.File([f],'alpha.png',{type:'image/png'}));
+    inp.files=d.files;
+    inp.dispatchEvent(new w.Event('change',{bubbles:true}));
+    await wait(1500);
+    const st1=(doc.querySelector('.status')||{}).textContent||'';
+    p('上传后状态: '+st1);
+    // 原图预览应为白底
+    const oimg=doc.querySelector('#originalPreview img');
+    if(oimg){
+      const i2=new Image();
+      await new Promise(r=>{i2.onload=r;i2.src=oimg.src});
+      const c=document.createElement('canvas');c.width=i2.width;c.height=i2.height;
+      const x=c.getContext('2d');x.drawImage(i2,0,0);
+      const dd=x.getImageData(0,0,c.width,c.height).data;
+      const k=(Math.floor(c.height/2)*c.width+Math.floor(c.width*3/4))*4;
+      p('原图预览右侧(原透明区) RGB=('+dd[k]+','+dd[k+1]+','+dd[k+2]+') 应≈(255,255,255)');
+    }
+    // 2) 直接点转换（不走 AI 放大）
+    doc.getElementById('convertBtn').click();
+    let finalSt='';
+    for(let t=0;t<240;t++){
+      finalSt=(doc.querySelector('.status')||{}).textContent||'';
+      if(finalSt.includes('完成')||finalSt.includes('失败'))break;
+      await wait(500);
+    }
+    p('转换后状态: '+finalSt);
+    // 3) 统计 SVG 填充色
+    const svg=doc.querySelector('#svgPreview svg');
+    if(svg){
+      const fills={};
+      let blackArea=0, total=0;
+      svg.querySelectorAll('path').forEach(pt=>{
+        const f=(pt.getAttribute('fill')||'').toLowerCase();
+        fills[f]=(fills[f]||0)+1;
+      });
+      p('SVG 填充色统计: '+JSON.stringify(fills));
+      // 检查是否有大面积黑色（第一个 path 通常是最大色块）
+      const first=svg.querySelector('path');
+      const ff=(first&&first.getAttribute('fill')||'').toLowerCase();
+      const isBlack=ff==='black'||ff==='#000000'||/rgb\(0,\s*0,\s*0\)/.test(ff);
+      p('最大色块填充: '+ff+' → '+(isBlack?'❌ 黑色':'✅ 非黑'));
+    }else p('矢量结果 SVG 未出现');
+  }catch(e){ p('EXC: '+e.message); }
+  p('ALL-DONE');
+});
+</script>
+</body>
+</html>
