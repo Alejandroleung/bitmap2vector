@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>color quantize test</title></head>
+<body>
+<iframe id="site" src="index.html" style="width:1300px;height:600px;border:1px solid #ccc"></iframe>
+<pre id="log">boot...</pre>
+<script>
+const QS=new URLSearchParams(location.search);
+const N=parseInt(QS.get('n')||'3');
+const IMG=QS.get('img')||'flag';   // flag | gradient | grayscale
+const log=[];
+function p(s){ log.push(s); document.getElementById('log').textContent=log.join('\n'); }
+function dataURLtoBlob(u){
+  const [h,b64]=u.split(','); const bin=atob(b64); const u8=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++)u8[i]=bin.charCodeAt(i);
+  return new Blob([u8],{type:h.match(/:(.*?);/)[1]});
+}
+// 造一张连续渐变图（用来验证渐变色会被压平）
+function makeGradient(){
+  const c=document.createElement('canvas'); c.width=400; c.height=200;
+  const x=c.getContext('2d');
+  const g=x.createLinearGradient(0,0,400,200);
+  g.addColorStop(0,'#ff0000'); g.addColorStop(0.5,'#00ff00'); g.addColorStop(1,'#0000ff');
+  x.fillStyle=g; x.fillRect(0,0,400,200);
+  return c.toDataURL('image/png');
+}
+window.addEventListener('load',async()=>{
+  p('start, n='+N+', img='+IMG);
+  const w=document.getElementById('site').contentWindow;
+  const doc=w.document;
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  for(let t=0;t<200;t++){ if(w.window&&w.window.Image)break; await wait(50); }
+  await wait(800);
+  try{
+    let blob;
+    if(IMG==='flag'){
+      blob=await (await fetch('__flag.png')).blob();
+    }else{
+      blob=dataURLtoBlob(makeGradient());
+    }
+    const inp=doc.getElementById('fileInput');
+    const d=new w.DataTransfer(); d.items.add(new w.File([blob],IMG+'.png',{type:'image/png'}));
+    inp.files=d.files;
+    inp.dispatchEvent(new w.Event('change',{bubbles:true}));
+    await wait(1200);
+    // 设置颜色数量
+    doc.getElementById('numberOfColors').value=String(N);
+    doc.getElementById('lineFilter').value='1';
+    doc.getElementById('convertBtn').click();
+    let st='';
+    for(let t=0;t<300;t++){
+      st=(doc.querySelector('.status')||{}).textContent||'';
+      if(st.includes('完成')||st.includes('失败')||st.includes('中止'))break;
+      await wait(500);
+    }
+    p('状态: '+st);
+    const svg=doc.querySelector('#svgPreview svg');
+    if(svg){
+      const fills={};
+      svg.querySelectorAll('path').forEach(pt=>{
+        const f=(pt.getAttribute('fill')||'').toLowerCase().replace(/\s/g,'');
+        fills[f]=(fills[f]||0)+1;
+      });
+      const keys=Object.keys(fills);
+      p('SVG 色块种类数='+keys.length+'（目标 '+N+'）→ '+(keys.length<=N?'✅':'❌ 超出'));
+      p('颜色: '+keys.join(' | '));
+      // 判断是否还有渐变痕迹：色数 > N 说明未压平
+    }else p('SVG 未出现');
+    // 面板调色板条目数（UI 显示）
+    const pal=doc.querySelectorAll('#paletteItems .palette-item, .palette-item');
+    p('调色板条数: '+pal.length);
+  }catch(e){ p('EXC: '+e.message); }
+  p('ALL-DONE');
+});
+</script>
+</body>
+</html>

@@ -670,8 +670,8 @@ input[type="range"]::-moz-range-thumb{
       </div>
       <div class="field-grid">
         <div class="field">
-          <label>颜色数量</label>
-          <input type="number" id="numberOfColors" value="16" min="2" max="64">
+          <label title="按面积保留最大的 N 种颜色，其余像素自动并入最接近的主色（可清除渐变与杂色）">颜色数量（主色）</label>
+          <input type="number" id="numberOfColors" value="16" min="2" max="64" title="按面积保留 N 种主色，其余颜色并入最接近的主色">
         </div>
         <div class="field">
           <label>线条拟合</label>
@@ -957,6 +957,123 @@ function handleFile(file){
 }
 
 // ============ IMAGE ENHANCE ============
+// 主色量化：按面积排序保留前 N 种主色，其余像素并入最接近的主色。
+// 目的：消除渐变、抗锯齿边缘、压缩噪点带来的杂色，让每个色块都是纯色。
+// 实现：5 位/通道直方图 + 面积加权 k-means（感知加权距离）+ 查找表重映射（O(像素数)）。
+function quantizeToColors(imgData, n){
+  const d=imgData.data, len=d.length;
+  n=Math.max(2,Math.min(64,n|0));
+  const BINS=32768;                       // 32×32×32
+  const cnt=new Uint32Array(BINS);
+  const sr=new Float64Array(BINS), sg=new Float64Array(BINS), sb=new Float64Array(BINS);
+  for(let i=0;i<len;i+=4){
+    const bi=((d[i]>>3)<<10)|((d[i+1]>>3)<<5)|(d[i+2]>>3);
+    cnt[bi]++; sr[bi]+=d[i]; sg[bi]+=d[i+1]; sb[bi]+=d[i+2];
+  }
+  const idxs=[];
+  for(let b=0;b<BINS;b++) if(cnt[b]) idxs.push(b);
+  if(idxs.length<=n) return {count:idxs.length, palette:null, merged:0};
+
+  idxs.sort((a,b)=>cnt[b]-cnt[a]);
+  // 面积最大的 N 个色箱作为初始质心
+  let cents=idxs.slice(0,n).map(b=>[sr[b]/cnt[b], sg[b]/cnt[b], sb[b]/cnt[b]]);
+  // 面积加权 k-means（4 轮足够收敛，权重大 = 大面积主色）
+  let weights=null;
+  for(let iter=0;iter<4;iter++){
+    const aR=new Float64Array(n), aG=new Float64Array(n), aB=new Float64Array(n), aW=new Float64Array(n);
+    for(const b of idxs){
+      const r=sr[b]/cnt[b], g=sg[b]/cnt[b], bl=sb[b]/cnt[b];
+      let best=0, bd=Infinity;
+      for(let k=0;k<n;k++){
+        const dr=r-cents[k][0], dg=g-cents[k][1], db=bl-cents[k][2];
+        const dist=dr*dr*0.299+dg*dg*0.587+db*db*0.114;   // 感知加权（人眼对绿色更敏感）
+        if(dist<bd){bd=dist;best=k}
+      }
+      const w=cnt[b];
+      aR[best]+=r*w; aG[best]+=g*w; aB[best]+=bl*w; aW[best]+=w;
+    }
+    for(let k=0;k<n;k++) if(aW[k]>0) cents[k]=[aR[k]/aW[k], aG[k]/aW[k], aB[k]/aW[k]];
+    weights=aW;
+  }
+  // 合并过于接近的质心：放大/AI 处理会带来细微色差，避免同一色块被拆成两种几乎相同的颜色
+  if(weights){
+    let mergedOnce=true;
+    while(mergedOnce){
+      mergedOnce=false;
+      for(let a=0;a<n && !mergedOnce;a++){
+        if(!weights[a]) continue;
+        for(let b=a+1;b<n;b++){
+          if(!weights[b]) continue;
+          const d0=cents[a][0]-cents[b][0], d1=cents[a][1]-cents[b][1], d2=cents[a][2]-cents[b][2];
+          if(Math.sqrt(d0*d0+d1*d1+d2*d2)<16){
+            const wa=weights[a], wb=weights[b], tw=wa+wb;
+            cents[a]=[(cents[a][0]*wa+cents[b][0]*wb)/tw,
+                      (cents[a][1]*wa+cents[b][1]*wb)/tw,
+                      (cents[a][2]*wa+cents[b][2]*wb)/tw];
+            weights[a]=tw; weights[b]=0;
+            mergedOnce=true; break;
+          }
+        }
+      }
+    }
+  }
+  // 先把面积极小的簇（<0.4%，噪点/压缩杂色）丢掉
+  const total=len/4;
+  let keep=[];
+  for(let k=0;k<n;k++){
+    if(weights && weights[k]>0 && weights[k]/total >= 0.004) keep.push(k);
+  }
+  // 再识别“抗锯齿过渡色”：面积小、且颜色正好落在两个更大主色的连线上（两色混合出来的边缘色）→ 并入
+  if(keep.length>2 && weights){
+    let changed=true;
+    while(changed && keep.length>2){
+      changed=false;
+      keep.sort((a,b)=>weights[a]-weights[b]);     // 从面积最小的开始判断
+      for(let i=0;i<keep.length && !changed;i++){
+        const s=keep[i];
+        if(weights[s]/total >= 0.03) continue;     // 面积够大，不视为过渡色
+        for(let x=1;x<keep.length && !changed;x++){
+          for(let y=x+1;y<keep.length && !changed;y++){
+            const A=cents[keep[x]], B=cents[keep[y]], S=cents[s];
+            const abx=B[0]-A[0], aby=B[1]-A[1], abz=B[2]-A[2];
+            const ab2=abx*abx+aby*aby+abz*abz;
+            if(ab2<400) continue;                  // 两个主色本身太接近，跳过
+            const t=((S[0]-A[0])*abx+(S[1]-A[1])*aby+(S[2]-A[2])*abz)/ab2;
+            if(t<0.05||t>0.95) continue;            // 不在两色中间段
+            const dd=Math.sqrt(Math.pow(S[0]-(A[0]+abx*t),2)+Math.pow(S[1]-(A[1]+aby*t),2)+Math.pow(S[2]-(A[2]+abz*t),2));
+            if(dd<26){ keep.splice(i,1); changed=true; }
+          }
+        }
+      }
+    }
+  }
+  if(keep.length<2){
+    // 兜底：按权重取前 2 名
+    const order=Array.from({length:n},(_,k)=>k).sort((a,b)=>(weights?weights[b]-weights[a]:0));
+    keep=[order[0], order[1]];
+  }
+  const pal=keep.map(k=>[Math.round(cents[k][0]),Math.round(cents[k][1]),Math.round(cents[k][2])]);
+  // 色箱 → 最近主色的查找表，避免逐像素做 N 次距离计算
+  const lut=new Uint8Array(BINS);
+  for(let b=0;b<BINS;b++){
+    const r=(((b>>10)&31)<<3)+4, g=(((b>>5)&31)<<3)+4, bl=((b&31)<<3)+4;
+    let best=0, bd=Infinity;
+    for(let k=0;k<pal.length;k++){
+      const dr=r-pal[k][0], dg=g-pal[k][1], db=bl-pal[k][2];
+      const dist=dr*dr*0.299+dg*dg*0.587+db*db*0.114;
+      if(dist<bd){bd=dist;best=k}
+    }
+    lut[b]=best;
+  }
+  // 全分辨率重映射（不做抖动，保证色块干净）
+  for(let i=0;i<len;i+=4){
+    const bi=((d[i]>>3)<<10)|((d[i+1]>>3)<<5)|(d[i+2]>>3);
+    const p=pal[lut[bi]];
+    d[i]=p[0]; d[i+1]=p[1]; d[i+2]=p[2];
+  }
+  return {count:pal.length, palette:pal, merged:idxs.length-pal.length};
+}
+
 function applyEnhancements(imageData, denoiseLevel, smoothRadius, sharpenAmount){
   let data=new Uint8ClampedArray(imageData.data);
   const w=imageData.width, h=imageData.height;
@@ -1110,6 +1227,10 @@ async function doConvert(){
     const smooth=+$("smooth").value;
     const sharpen=+$("sharpen").value;
     if(denoise||smooth||sharpen) applyEnhancements(imgData,denoise,smooth,sharpen);
+
+    // 主色量化：先按面积保留 N 种主色，其余并入最近主色（消除渐变/杂色）
+    let qinfo=null;
+    try{ qinfo=quantizeToColors(imgData,opts.numberofcolors); }catch(e){ qinfo=null; }
     cx.putImageData(imgData,0,0);
 
     const st=performance.now();
@@ -1129,7 +1250,7 @@ async function doConvert(){
     editorPanel.classList.add("show");
     svgZoomControls.style.display="flex"; panX=0;panY=0; svgZoomRange.value=100; updateSvgZoom(100);
     initEditor();
-    setStatus(`完成！${kb} KB，${el}s`,"success");
+    setStatus(`完成！${kb} KB，${el}s${qinfo?` · 已归并为 ${qinfo.count} 种主色`:""}`,"success");
   } catch(err){setStatus(`失败: ${err.message}`,"error")}
   finally{convertBtn.disabled=false}
 }

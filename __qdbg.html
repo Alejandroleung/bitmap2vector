@@ -1,0 +1,26 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
+<iframe id="site" src="index.html" style="width:900px;height:400px"></iframe>
+<pre id="log">boot...</pre>
+<script>
+const log=[];function p(s){log.push(s);document.getElementById('log').textContent=log.join('\n');}
+window.addEventListener('load',async()=>{
+  const w=document.getElementById('site').contentWindow;
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  for(let t=0;t<200;t++){ if(w.window&&w.window.Image)break; await wait(50);} await wait(600);
+  try{
+    const img=await new Promise((r,j)=>{const i=new w.Image();i.onload=()=>r(i);i.onerror=j;i.src='__flag.png'});
+    const c=w.document.createElement('canvas');c.width=img.width;c.height=img.height;
+    const x=c.getContext('2d');x.drawImage(img,0,0);
+    const id=x.getImageData(0,0,c.width,c.height);
+    for(const n of [3,6,16,32,64]){
+      try{
+        const r=w.eval('quantizeToColors')(id,n);
+        p('n='+n+' → count='+r.count+' merged='+r.merged);
+      }catch(e){ p('n='+n+' EXC: '+e.message); }
+      // 重新取数据（量化会改写）
+      x.drawImage(img,0,0);
+    }
+  }catch(e){p('OUTER EXC: '+e.message)}
+  p('DONE');
+});
+</script></body></html>

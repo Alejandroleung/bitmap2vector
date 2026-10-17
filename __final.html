@@ -1,0 +1,38 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
+<iframe id="site" src="index.html" style="width:1300px;height:600px"></iframe>
+<pre id="log">boot...</pre>
+<script>
+const log=[];function p(s){log.push(s);document.getElementById('log').textContent=log.join('\n');}
+window.addEventListener('load',async()=>{
+  const w=document.getElementById('site').contentWindow,doc=w.document;
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  for(let t=0;t<200;t++){if(w.window&&w.window.Image)break;await wait(50);}await wait(700);
+  try{
+    const blob=await (await fetch('__flag.png')).blob();
+    const inp=doc.getElementById('fileInput');
+    const d=new w.DataTransfer();d.items.add(new w.File([blob],'flag.png',{type:'image/png'}));
+    inp.files=d.files;inp.dispatchEvent(new w.Event('change',{bubbles:true}));
+    await wait(1200);
+    // 放大 2× → 自动转换（默认 16 色）
+    doc.getElementById('upscaleFactor').value='2';
+    doc.getElementById('upscaleBtn').click();
+    let st='';
+    for(let t=0;t<400;t++){
+      st=(doc.querySelector('.status')||{}).textContent||'';
+      if(st.includes('完成')&&!st.includes('放大完成'))break;
+      if(st.includes('失败')||st.includes('中止'))break;
+      await wait(500);
+    }
+    p('最终状态: '+st);
+    const svg=doc.querySelector('#svgPreview svg');
+    if(svg){
+      const fills={};svg.querySelectorAll('path').forEach(pt=>{const f=(pt.getAttribute('fill')||'').toLowerCase();fills[f]=(fills[f]||0)+1;});
+      const keys=Object.keys(fills);
+      p('放大后矢量色数='+keys.length+' → '+keys.join(' | '));
+      const meta=doc.querySelector('#svgMeta').textContent;
+      p('SVG 元信息: '+meta);
+    }else p('SVG 未出现');
+  }catch(e){p('EXC: '+e.message)}
+  p('DONE');
+});
+</script></body></html>
