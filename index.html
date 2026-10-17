@@ -790,7 +790,7 @@ input[type="range"]::-moz-range-thumb{
     <div class="tips-grid">
       <div class="tip"><div class="tip-n">STEP 01</div><div class="tip-t">智能分析 + 预处理</div><div class="tip-d">上传后点「智能分析」自动调参。噪点多时调大降噪/平滑滑块再转换。</div></div>
       <div class="tip"><div class="tip-n">STEP 02</div><div class="tip-t">在线编辑</div><div class="tip-d">转换后使用选择/吸管/填充工具编辑 SVG 路径颜色，支持 CMYK 色值调节。</div></div>
-      <div class="tip"><div class="tip-n">STEP 03</div><div class="tip-t">CMYK 导出</div><div class="tip-d">点击「CMYK 导出」生成印刷专用 SVG，颜色将转换为 CMYK 色彩空间。</div></div>
+      <div class="tip"><div class="tip-n">STEP 03</div><div class="tip-t">印刷 PDF 导出</div><div class="tip-d">点击「印刷 PDF」生成 DeviceCMYK 四色矢量 PDF，可设置成品宽度（mm），直接交付印刷厂。</div></div>
     </div>
   </div>
 </div>
@@ -1360,7 +1360,10 @@ function svgPathToPdfOps(d){
   let i=0, cmd="", cx=0, cy=0, sx=0, sy=0, pcx=0, pcy=0, hasCtrl=false, prev="", guard=0;
   const N=pdfNum;
   const rd=()=>{ const v=t[i++]; return typeof v==="number"?v:0; };
-  const CB=(x1,y1,x2,y2,x,y)=>ops.push("c "+N(x1)+" "+N(y1)+" "+N(x2)+" "+N(y2)+" "+N(x)+" "+N(y));
+  // PDF 是后缀（逆波兰）语法：操作数必须写在算子前面 —— "x y m"、"x y l"、"x1 y1 x2 y2 x3 y3 c"
+  const MV=(x,y)=>ops.push(N(x)+" "+N(y)+" m");
+  const LN=(x,y)=>ops.push(N(x)+" "+N(y)+" l");
+  const CB=(x1,y1,x2,y2,x,y)=>ops.push(N(x1)+" "+N(y1)+" "+N(x2)+" "+N(y2)+" "+N(x)+" "+N(y)+" c");
   while(i<t.length && guard++<t.length*6+64){
     if(typeof t[i]==="string"){
       cmd=t[i++];
@@ -1374,14 +1377,14 @@ function svgPathToPdfOps(d){
     if(up==="Z"){ ops.push("h"); cx=sx; cy=sy; prev="Z"; hasCtrl=false; if(typeof t[i]==="number") i++; continue; }
     if(up==="M"){
       const x=ax(rd()), y=ay(rd());
-      ops.push("m "+N(x)+" "+N(y));
+      MV(x,y);
       cx=x; cy=y; sx=x; sy=y; prev="M"; hasCtrl=false;
       cmd=rel?"l":"L";                       // M 后连续的坐标对按 lineto 处理
       continue;
     }
-    if(up==="L"){ const x=ax(rd()), y=ay(rd()); ops.push("l "+N(x)+" "+N(y)); cx=x; cy=y; prev="L"; hasCtrl=false; continue; }
-    if(up==="H"){ const x=ax(rd()); ops.push("l "+N(x)+" "+N(cy)); cx=x; prev="H"; hasCtrl=false; continue; }
-    if(up==="V"){ const y=ay(rd()); ops.push("l "+N(cx)+" "+N(y)); cy=y; prev="V"; hasCtrl=false; continue; }
+    if(up==="L"){ const x=ax(rd()), y=ay(rd()); LN(x,y); cx=x; cy=y; prev="L"; hasCtrl=false; continue; }
+    if(up==="H"){ const x=ax(rd()); LN(x,N(cy)); cx=x; prev="H"; hasCtrl=false; continue; }
+    if(up==="V"){ const y=ay(rd()); LN(N(cx),y); cy=y; prev="V"; hasCtrl=false; continue; }
     if(up==="C"){
       const x1=ax(rd()), y1=ay(rd()), x2=ax(rd()), y2=ay(rd()), x=ax(rd()), y=ay(rd());
       CB(x1,y1,x2,y2,x,y); cx=x; cy=y; pcx=x2; pcy=y2; hasCtrl=true; prev="C"; continue;
@@ -1407,7 +1410,7 @@ function svgPathToPdfOps(d){
       CB(x1,y1,x2,y2,x,y); cx=x; cy=y; pcx=qx; pcy=qy; hasCtrl=true; prev="T"; continue;
     }
     // A/a 圆弧：ImageTracer 不产生，退化成直线保证不出错
-    if(up==="A"){ rd(); rd(); rd(); rd(); rd(); const x=ax(rd()), y=ay(rd()); ops.push("l "+N(x)+" "+N(y)); cx=x; cy=y; hasCtrl=false; prev="A"; continue; }
+    if(up==="A"){ rd(); rd(); rd(); rd(); rd(); const x=ax(rd()), y=ay(rd()); LN(x,y); cx=x; cy=y; hasCtrl=false; prev="A"; continue; }
     i++;                                     // 未知命令：跳过，防死循环
   }
   return ops;
