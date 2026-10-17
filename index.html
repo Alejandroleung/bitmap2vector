@@ -1837,6 +1837,18 @@ function canvasSanityCheck(){
   }catch(e){ return false; }
 }
 
+// 构造 upscale 参数：整块推理超过约 256px 后 WebGL 会静默输出全黑（不报错），
+// 必须按块（patchSize）推理再拼接。小图保持整块以获得最佳质量。
+function mkUpscaleOpts(srcImg){
+  const o={output:'base64'};
+  try{
+    const w=srcImg.naturalWidth||srcImg.width||0;
+    const h=srcImg.naturalHeight||srcImg.height||0;
+    if(w>256||h>256){ o.patchSize=256; o.padding=2; }
+  }catch(e){}
+  return o;
+}
+
 async function loadEmbeddedModelData(){
   if(window.__BTV_MODEL_DATA) return true;
   try{
@@ -1911,7 +1923,7 @@ upscaleBtn.addEventListener("click",async()=>{
     upscaleProgressBar.style.width="60%";
     let result;
     try{
-      result=await up.upscale(img,{output:'base64'});
+      result=await up.upscale(img,mkUpscaleOpts(img));
     }catch(e1){
       // 模型来源可用但权重拉取失败时，退回内嵌模型数据再试一次
       if(window.__BTV_MODEL_DATA){ throw e1; }
@@ -1922,14 +1934,14 @@ upscaleBtn.addEventListener("click",async()=>{
       upscalerInstance=new window.Upscaler({model:def});
       up=upscalerInstance;
       lastModelSource="内嵌数据(vendor/model-data.js)";
-      result=await up.upscale(img,{output:'base64'});
+      result=await up.upscale(img,mkUpscaleOpts(img));
     }
     if(factor>=4){
       // 模型原生 2×：4× 需要连续跑两遍（第二遍吃第一遍的输出）
       setStatus("2× 完成，正在第二遍放大到 4×...","info");
       upscaleProgressBar.style.width="75%";
       const img2=await new Promise((rl,rj)=>{const i=new Image;i.onload=()=>rl(i);i.onerror=rj;i.src=result});
-      result=await up.upscale(img2,{output:'base64'});
+      result=await up.upscale(img2,mkUpscaleOpts(img2));
     }
     upscaleProgressBar.style.width="90%";
     currentImgDataUrl=result;
