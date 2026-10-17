@@ -686,6 +686,10 @@ input[type="range"]::-moz-range-thumb{
           <label>最小面积 (px)</label>
           <input type="number" id="minArea" value="1" min="1" max="100">
         </div>
+        <div class="field full">
+          <label title="导出印刷 PDF 时的成品宽度，高度按图比例自动换算；默认按 300dpi 反推">印刷宽度 (mm)</label>
+          <input type="number" id="printWidthMm" value="100" min="5" max="5000" step="1" title="PDF 成品宽度（mm），高度按图片比例自动换算">
+        </div>
       </div>
     </div>
 
@@ -726,8 +730,8 @@ input[type="range"]::-moz-range-thumb{
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-9 9 9 9 0 0 1-7.4-3.9"/><path d="M3 12a9 9 0 0 1 9-9 9 9 0 0 1 7.4 3.9"/><path d="M17 3v4h-4"/><path d="M7 21v-4h4"/></svg>转换</button>
         <button class="btn btn-success" id="downloadBtn" disabled>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>导出 SVG</button>
-        <button class="btn btn-cmyk" id="cmykBtn" disabled>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4"/></svg>CMYK</button>
+        <button class="btn btn-cmyk" id="cmykBtn" disabled title="导出 DeviceCMYK 矢量 PDF（印刷交付用，可选成品宽度 mm）">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M8 13h1.5"/><path d="M8 17h1.5"/><path d="M13 13h3"/><path d="M13 17h3"/></svg>印刷 PDF</button>
         <button class="btn btn-outline" id="sameSizeBtn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 8h8v8H8z"/></svg>原尺寸</button>
         <button class="btn btn-danger" id="resetBtn">
@@ -825,6 +829,7 @@ const uploadArea=$("uploadArea"), fileInput=$("fileInput");
 const originalPreview=$("originalPreview"), svgPreview=$("svgPreview"), svgMeta=$("svgMeta");
 const zoomControls=$("zoomControls"), zoomRange=$("zoomRange"), zoomValue=$("zoomValue"), fitBtn=$("fitBtn");
 const convertBtn=$("convertBtn"), downloadBtn=$("downloadBtn"), cmykBtn=$("cmykBtn"), upscaleBtn=$("upscaleBtn");
+const printWidthMm=$("printWidthMm");
 const sameSizeBtn=$("sameSizeBtn"), resetBtn=$("resetBtn"), aiBtn=$("aiBtn");
 const statusEl=$("status"), editorPanel=$("editorPanel");
 const toolSelect=$("toolSelect"), toolEyedrop=$("toolEyedrop"), toolDraw=$("toolDraw"), toolFill=$("toolFill"), toolLasso=$("toolLasso"), toolUndo=$("toolUndo"), toolRestore=$("toolRestore");
@@ -933,6 +938,8 @@ function handleFile(file){
         setStatus("检测到浏览器画布渲染异常（画面全黑常见于硬件加速故障或浏览器插件冲突）。请尝试：① 无痕窗口打开本站 ② 关闭 Edge 硬件加速后重启浏览器","error");
         return;
       }
+      // 印刷尺寸默认值：按 300dpi 由像素宽反推毫米宽（印刷行业常用精度），用户可改
+      try{ printWidthMm.value=Math.max(5,Math.round(img.naturalWidth/300*25.4)); }catch(e0){}
       if(hasTransparentPixels(img)){
         const fc=document.createElement("canvas");fc.width=img.naturalWidth;fc.height=img.naturalHeight;
         const fx=fc.getContext("2d");
@@ -1240,6 +1247,12 @@ async function doConvert(){
     // 主色量化：先按面积保留 N 种主色，其余并入最近主色（消除渐变/杂色）
     let qinfo=null;
     try{ qinfo=quantizeToColors(imgData,opts.numberofcolors); }catch(e){ qinfo=null; }
+    // 把量化后的调色板直接交给 ImageTracer（options.pal）。
+    // 否则它会对已量化的图再做一次自己的 k-means，面积小的主色（如小面积红块）会被合并掉，
+    // 出现"选了 3 色却只出 2 色"的丢色问题。
+    if(qinfo && qinfo.palette && qinfo.palette.length){
+      opts.pal=qinfo.palette.map(c=>({r:c[0],g:c[1],b:c[2],a:255}));
+    }
     cx.putImageData(imgData,0,0);
 
     const st=performance.now();
@@ -1298,95 +1311,258 @@ function rgbToCmykPrint(r,g,b){
   }
   return {c,m,y,k};
 }
-// 把 SVG 改写成带 CMYK 颜色值的版本。
-// SVG 规范里只有 sRGB，CMYK 通过两种扩展写法携带：
-//   fill:#RRGGBB                          ← 浏览器/普通查看器的回退色（必须保留，否则会显示黑色）
-//   fill:#RRGGBB icc-color(CMYK, c,m,y,k) ← SVG 1.1 标准 ICC 写法（Illustrator/Scribus/RIP 可识别）
-//   fill:device-cmyk(c m y k)             ← SVG2/CSS Color4 写法（新版工具可识别）
-// 不支持的渲染器只丢弃这三条声明，回退到元素上的 fill 属性，画面不受影响。
-function toCmykSvg(svgStr){
-  const doc=new DOMParser().parseFromString(svgStr,"image/svg+xml");
-  if(doc.querySelector("parsererror")) return null;
-  const NS="http://www.w3.org/2000/svg";
-  const svg=doc.documentElement;
-  // 1) 声明 CMYK 色彩配置文件（供识别 ICC 的软件使用）
-  let defs=svg.querySelector("defs");
-  if(!defs){ defs=doc.createElementNS(NS,"defs"); svg.insertBefore(defs,svg.firstChild); }
-  if(!defs.querySelector("color-profile[name='CMYK']")){
-    const cp=doc.createElementNS(NS,"color-profile");
-    cp.setAttribute("name","CMYK");
-    cp.setAttribute("rendering-intent","relative-colorimetric");
-    defs.appendChild(cp);
+// ============ 印刷 PDF 导出（真 DeviceCMYK）============
+// PDF 是印刷交付的标准格式，原生支持 DeviceCMYK 色彩空间：
+//   内容流里 `c m y k k` 设填充色、`c m y k K` 设描边色 —— 文件里直接存的就是 CMYK 数值，
+//   不像 SVG 那样只能写 RGB（补 icc-color 后缀，实际仍按 sRGB 渲染）。
+// 矢量图全是路径，无需嵌入字体；半透明用 ExtGState 的 /ca /CA；页面尺寸按成品宽度(mm)等比换算。
+function pdfNum(v,d){
+  if(!isFinite(v)) v=0;
+  let s=v.toFixed(d===undefined?3:d);
+  if(s.indexOf(".")>=0) s=s.replace(/0+$/,"").replace(/\.$/,"");
+  if(s==="-0"||s==="") s="0";
+  return s;
+}
+function cmykOp(c,upper){
+  return pdfNum(c.c/100,4)+" "+pdfNum(c.m/100,4)+" "+pdfNum(c.y/100,4)+" "+pdfNum(c.k/100,4)+" "+(upper?"K":"k");
+}
+function rgbHex(a){return "#"+a.map(v=>Math.max(0,Math.min(255,v|0)).toString(16).padStart(2,"0")).join("");}
+// PDF 文本串：纯 ASCII 用字面量，含中文按 UTF-16BE（带 BOM）写成十六进制串
+function pdfTextStr(s){
+  s=String(s==null?"":s);
+  if(/^[\x20-\x7E]*$/.test(s)) return "("+s.replace(/[\\()]/g,m=>"\\"+m)+")";
+  let hex="FEFF";
+  for(const ch of s){
+    const cp=ch.codePointAt(0);
+    if(cp>0xFFFF){
+      const v=cp-0x10000;
+      hex+=(0xD800+(v>>10)).toString(16).toUpperCase().padStart(4,"0");
+      hex+=(0xDC00+(v&0x3FF)).toString(16).toUpperCase().padStart(4,"0");
+    }else{
+      hex+=cp.toString(16).toUpperCase().padStart(4,"0");
+    }
   }
-  const num=v=>{const s=(v/100).toFixed(4).replace(/0+$/,"").replace(/\.$/,"");return s===""?"0":s;};
-  const palette=new Map();
-  const shapes=svg.querySelectorAll("path,rect,circle,ellipse,polygon,polyline,line,text,tspan,g");
-  shapes.forEach(el=>{
-    const styleStr=el.getAttribute("style")||"";
-    ["fill","stroke"].forEach(prop=>{
-      // 取生效值：style 优先，其次属性
-      let val=el.getAttribute(prop)||"";
-      const sm=styleStr.match(new RegExp("(?:^|;)\\s*"+prop+"\\s*:\\s*([^;]+)"));
-      if(sm) val=sm[1].trim();
-      if(!val||val==="none"||/^url\(/i.test(val)||val==="transparent") return;
-      const rgbc=parseSvgColor(val);
-      if(!rgbc) return;
-      const cmyk=rgbToCmykPrint(rgbc[0],rgbc[1],rgbc[2]);
-      const hex="#"+rgbc.map(v=>v.toString(16).padStart(2,"0")).join("");
-      palette.set(hex,cmyk);
-      // 保留原 fill 属性做回退
-      el.setAttribute(prop,hex);
-      // 重写 style：去掉旧的 fill/stroke 声明，再按"RGB 回退 → icc-color → device-cmyk"顺序写入
-      let rest=(el.getAttribute("style")||"")
-        .replace(new RegExp("(^|;)\\s*"+prop+"\\s*:[^;]*","g"),"$1")
-        .replace(/^;+|;+$/g,"").trim();
-      const decls=[
-        `${prop}:${hex}`,
-        `${prop}:${hex} icc-color(CMYK, ${num(cmyk.c)}, ${num(cmyk.m)}, ${num(cmyk.y)}, ${num(cmyk.k)})`,
-        `${prop}:device-cmyk(${num(cmyk.c)} ${num(cmyk.m)} ${num(cmyk.y)} ${num(cmyk.k)})`,
-      ].join(";");
-      el.setAttribute("style",(rest?rest+";":"")+decls);
-      el.setAttribute(`data-cmyk-${prop}`,`C${cmyk.c} M${cmyk.m} Y${cmyk.y} K${cmyk.k}`);
-    });
+  return "<"+hex+">";
+}
+function pdfDateStr(dt){
+  const p=n=>String(n).padStart(2,"0");
+  const off=-dt.getTimezoneOffset(), sign=off>=0?"+":"-";
+  const ah=Math.floor(Math.abs(off)/60), am=Math.abs(off)%60;
+  return "D:"+dt.getFullYear()+p(dt.getMonth()+1)+p(dt.getDate())+p(dt.getHours())+p(dt.getMinutes())+p(dt.getSeconds())+sign+p(ah)+"'"+p(am)+"'";
+}
+// SVG 路径 → PDF 路径操作：统一输出绝对坐标；二次贝塞尔(Q/T)转三次(PDF 只有 c)
+function svgPathToPdfOps(d){
+  const t=[];
+  const re=/([MmLlHhVvCcSsQqTtAaZz])|([-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?)/g;
+  let m;
+  while((m=re.exec(d))) t.push(m[1]||parseFloat(m[2]));
+  const ops=[];
+  let i=0, cmd="", cx=0, cy=0, sx=0, sy=0, pcx=0, pcy=0, hasCtrl=false, prev="", guard=0;
+  const N=pdfNum;
+  const rd=()=>{ const v=t[i++]; return typeof v==="number"?v:0; };
+  const CB=(x1,y1,x2,y2,x,y)=>ops.push("c "+N(x1)+" "+N(y1)+" "+N(x2)+" "+N(y2)+" "+N(x)+" "+N(y));
+  while(i<t.length && guard++<t.length*6+64){
+    if(typeof t[i]==="string"){
+      cmd=t[i++];
+      // Z 后面没有参数，必须在这里就地处理，否则会漏掉闭合（描边留下缺口）
+      if(cmd==="Z"||cmd==="z"){ ops.push("h"); cx=sx; cy=sy; prev="Z"; hasCtrl=false; if(typeof t[i]==="number") i++; }
+      continue;
+    }
+    if(!cmd) break;
+    const up=cmd.toUpperCase(), rel=(cmd!==up);
+    const ax=v=>rel?cx+v:v, ay=v=>rel?cy+v:v;
+    if(up==="Z"){ ops.push("h"); cx=sx; cy=sy; prev="Z"; hasCtrl=false; if(typeof t[i]==="number") i++; continue; }
+    if(up==="M"){
+      const x=ax(rd()), y=ay(rd());
+      ops.push("m "+N(x)+" "+N(y));
+      cx=x; cy=y; sx=x; sy=y; prev="M"; hasCtrl=false;
+      cmd=rel?"l":"L";                       // M 后连续的坐标对按 lineto 处理
+      continue;
+    }
+    if(up==="L"){ const x=ax(rd()), y=ay(rd()); ops.push("l "+N(x)+" "+N(y)); cx=x; cy=y; prev="L"; hasCtrl=false; continue; }
+    if(up==="H"){ const x=ax(rd()); ops.push("l "+N(x)+" "+N(cy)); cx=x; prev="H"; hasCtrl=false; continue; }
+    if(up==="V"){ const y=ay(rd()); ops.push("l "+N(cx)+" "+N(y)); cy=y; prev="V"; hasCtrl=false; continue; }
+    if(up==="C"){
+      const x1=ax(rd()), y1=ay(rd()), x2=ax(rd()), y2=ay(rd()), x=ax(rd()), y=ay(rd());
+      CB(x1,y1,x2,y2,x,y); cx=x; cy=y; pcx=x2; pcy=y2; hasCtrl=true; prev="C"; continue;
+    }
+    if(up==="S"){
+      const x2=ax(rd()), y2=ay(rd()), x=ax(rd()), y=ay(rd());
+      const smooth=(prev==="C"||prev==="S")&&hasCtrl;
+      const x1=smooth?2*cx-pcx:cx, y1=smooth?2*cy-pcy:cy;
+      CB(x1,y1,x2,y2,x,y); cx=x; cy=y; pcx=x2; pcy=y2; hasCtrl=true; prev="S"; continue;
+    }
+    if(up==="Q"){
+      const qx=ax(rd()), qy=ay(rd()), x=ax(rd()), y=ay(rd());
+      const x1=cx+(qx-cx)*2/3, y1=cy+(qy-cy)*2/3;
+      const x2=x+(qx-x)*2/3,  y2=y+(qy-y)*2/3;
+      CB(x1,y1,x2,y2,x,y); cx=x; cy=y; pcx=qx; pcy=qy; hasCtrl=true; prev="Q"; continue;
+    }
+    if(up==="T"){
+      const x=ax(rd()), y=ay(rd());
+      const smooth=(prev==="Q"||prev==="T")&&hasCtrl;
+      const qx=smooth?2*cx-pcx:cx, qy=smooth?2*cy-pcy:cy;
+      const x1=cx+(qx-cx)*2/3, y1=cy+(qy-cy)*2/3;
+      const x2=x+(qx-x)*2/3,  y2=y+(qy-y)*2/3;
+      CB(x1,y1,x2,y2,x,y); cx=x; cy=y; pcx=qx; pcy=qy; hasCtrl=true; prev="T"; continue;
+    }
+    // A/a 圆弧：ImageTracer 不产生，退化成直线保证不出错
+    if(up==="A"){ rd(); rd(); rd(); rd(); rd(); const x=ax(rd()), y=ay(rd()); ops.push("l "+N(x)+" "+N(y)); cx=x; cy=y; hasCtrl=false; prev="A"; continue; }
+    i++;                                     // 未知命令：跳过，防死循环
+  }
+  return ops;
+}
+// 各类 SVG 图形 → 路径数据（ImageTracer 只产 path，其余是兜底）
+function shapeToPathData(el){
+  const tag=el.tagName.toLowerCase();
+  const a=v=>parseFloat(el.getAttribute(v))||0;
+  if(tag==="path") return el.getAttribute("d")||"";
+  if(tag==="rect"){
+    const x=a("x"), y=a("y"), w=a("width"), h=a("height");
+    return "M "+x+" "+y+" L "+(x+w)+" "+y+" L "+(x+w)+" "+(y+h)+" L "+x+" "+(y+h)+" Z";
+  }
+  if(tag==="circle"||tag==="ellipse"){
+    const cx=a("cx"), cy=a("cy");
+    const rx=tag==="circle"?a("r"):a("rx"), ry=tag==="circle"?a("r"):a("ry");
+    const k=0.5522847498;
+    return "M "+(cx+rx)+" "+cy
+      +" C "+(cx+rx)+" "+(cy+ry*k)+" "+(cx+rx*k)+" "+(cy+ry)+" "+cx+" "+(cy+ry)
+      +" C "+(cx-rx*k)+" "+(cy+ry)+" "+(cx-rx)+" "+(cy+ry*k)+" "+(cx-rx)+" "+cy
+      +" C "+(cx-rx)+" "+(cy-ry*k)+" "+(cx-rx*k)+" "+(cy-ry)+" "+cx+" "+(cy-ry)
+      +" C "+(cx+rx*k)+" "+(cy-ry)+" "+(cx+rx)+" "+(cy-ry*k)+" "+(cx+rx)+" "+cy+" Z";
+  }
+  if(tag==="polygon"||tag==="polyline"){
+    const pts=(el.getAttribute("points")||"").trim().split(/[\s,]+/).map(Number).filter(v=>!isNaN(v));
+    let d="";
+    for(let i=0;i<pts.length-1;i+=2) d+=(d?"L ":"M ")+pts[i]+" "+pts[i+1]+" ";
+    if(tag==="polygon") d+="Z";
+    return d;
+  }
+  if(tag==="line") return "M "+a("x1")+" "+a("y1")+" L "+a("x2")+" "+a("y2");
+  return "";
+}
+// 组装最小 PDF（1.4）：Catalog / Pages / Page / Contents / Info [/ExtGState...]
+function assemblePdf(objs){
+  let out="%PDF-1.4\n%\u00E2\u00E3\u00CF\u00D3\n";
+  const offs=[];
+  for(let i=0;i<objs.length;i++){
+    offs.push(out.length);
+    out+=(i+1)+" 0 obj\n"+objs[i]+"\nendobj\n";
+  }
+  const xref=out.length;
+  out+="xref\n0 "+(objs.length+1)+"\n0000000000 65535 f \n";
+  for(let i=0;i<offs.length;i++) out+=String(offs[i]).padStart(10,"0")+" 00000 n \n";
+  out+="trailer\n<< /Size "+(objs.length+1)+" /Root 1 0 R /Info 5 0 R >>\nstartxref\n"+xref+"\n%%EOF\n";
+  const bytes=new Uint8Array(out.length);
+  for(let i=0;i<out.length;i++) bytes[i]=out.charCodeAt(i)&0xFF;
+  return bytes;
+}
+function buildPrintPdf(rootSvg,widthMm,title){
+  let iw=0, ih=0, ox=0, oy=0;
+  const vb=(rootSvg.getAttribute("viewBox")||"").trim();
+  if(vb){
+    const p=vb.split(/[\s,]+/).map(Number);
+    if(p.length===4 && p[2]>0 && p[3]>0){ ox=p[0]; oy=p[1]; iw=p[2]; ih=p[3]; }
+  }
+  if(!iw||!ih){
+    iw=parseFloat(rootSvg.getAttribute("width"))||0;
+    ih=parseFloat(rootSvg.getAttribute("height"))||0;
+  }
+  if(!iw||!ih) return null;
+  const s=(widthMm*72/25.4)/iw;               // pt / 用户单位
+  const pageW=iw*s, pageH=ih*s;
+  const body=[];
+  body.push("q");
+  body.push("0 0 0 0 k");                     // 满版铺"纸白"（0 墨量），避免查看器把透明画成黑
+  body.push("0 0 "+pdfNum(pageW)+" "+pdfNum(pageH)+" re f");
+  body.push("q");
+  // SVG 是 y 向下、PDF 是 y 向上 → 用 cm 做翻转，之后可以直接用 SVG 原始坐标
+  body.push([pdfNum(s,6),0,0,pdfNum(-s,6),pdfNum(-ox*s,6),pdfNum((ih+oy)*s,6),"cm"].join(" "));
+  const gsMap=new Map(), gsList=[], palette=new Set();
+  const CAP={butt:0,round:1,square:2}, JOIN={miter:0,round:1,bevel:2};
+  let shapes=0;
+  rootSvg.querySelectorAll("path,rect,circle,ellipse,polygon,polyline,line").forEach(el=>{
+    let cs;
+    try{ cs=window.getComputedStyle(el); }catch(e){ return; }
+    if(!cs||cs.display==="none"||cs.visibility==="hidden") return;
+    const fRgb=parseSvgColor(cs.fill), sRgb=parseSvgColor(cs.stroke);
+    let lw=parseFloat(cs.strokeWidth); if(isNaN(lw)) lw=1;
+    const hasFill=!!fRgb, hasStroke=!!sRgb&&lw>0;
+    if(!hasFill&&!hasStroke) return;
+    const d=shapeToPathData(el);
+    if(!d) return;
+    const ops=svgPathToPdfOps(d);
+    if(!ops.length) return;
+    // 透明度 → ExtGState
+    const op=parseFloat(cs.opacity), fo=parseFloat(cs.fillOpacity), so=parseFloat(cs.strokeOpacity);
+    const fa=(isNaN(op)?1:op)*(isNaN(fo)?1:fo);
+    const sa=(isNaN(op)?1:op)*(isNaN(so)?1:so);
+    if(fa<0.999||sa<0.999){
+      const key=fa.toFixed(3)+"|"+sa.toFixed(3);
+      if(!gsMap.has(key)){
+        const nm="GS"+gsList.length;
+        gsMap.set(key,nm);
+        gsList.push({name:nm,ca:fa,CA:sa});
+      }
+      body.push("/"+gsMap.get(key)+" gs");
+    }
+    if(hasFill){
+      body.push(cmykOp(rgbToCmykPrint(fRgb[0],fRgb[1],fRgb[2]),false));
+      palette.add(rgbHex(fRgb));
+    }
+    if(hasStroke){
+      body.push(cmykOp(rgbToCmykPrint(sRgb[0],sRgb[1],sRgb[2]),true));
+      palette.add(rgbHex(sRgb));
+      body.push(pdfNum(lw)+" w");
+      const cap=CAP[cs.strokeLinecap]!==undefined?CAP[cs.strokeLinecap]:0;
+      const jn=JOIN[cs.strokeLinejoin]!==undefined?JOIN[cs.strokeLinejoin]:0;
+      let ml=parseFloat(cs.strokeMiterlimit); if(isNaN(ml)||ml<1) ml=4;
+      body.push(cap+" J "+jn+" j "+pdfNum(ml,2)+" M");
+    }
+    body.push(ops.join(" "));
+    const rule=cs.fillRule==="evenodd"?"*":"";
+    body.push(hasFill&&hasStroke?("B"+rule):(hasFill?("f"+rule):"S"));
+    shapes++;
   });
-  // 2) 元数据：把用到的每个颜色的 CMYK 值记进文件，方便印前核对
-  //    注意：xmlns:cmyk 必须用 setAttributeNS 声明，否则 XMLSerializer 会把前缀重写成 ns1
-  const CMYKNS="https://bitmap2vector.local/cmyk";
-  const md=doc.createElementNS(NS,"metadata");
-  const root=doc.createElementNS(CMYKNS,"cmyk:palette");
-  root.setAttributeNS("http://www.w3.org/2000/xmlns/","xmlns:cmyk",CMYKNS);
-  root.setAttribute("color-space","CMYK");
-  root.setAttribute("tac-limit","300");
-  palette.forEach((v,hex)=>{
-    const e=doc.createElementNS(CMYKNS,"cmyk:color");
-    e.setAttribute("hex",hex);
-    e.setAttribute("c",v.c); e.setAttribute("m",v.m); e.setAttribute("y",v.y); e.setAttribute("k",v.k);
-    e.setAttribute("tac",v.c+v.m+v.y+v.k);
-    root.appendChild(e);
-  });
-  md.appendChild(root);
-  svg.insertBefore(md,defs.nextSibling);
-  return {svg:new XMLSerializer().serializeToString(svg), colors:palette.size};
+  body.push("Q");
+  body.push("Q");
+  if(!shapes) return null;
+  const stream=body.join("\n");
+  const objs=[];
+  objs.push("<< /Type /Catalog /Pages 2 0 R >>");
+  objs.push("<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+  const gsRefs=gsList.length?(" /ExtGState << "+gsList.map((g,i)=>"/"+g.name+" "+(6+i)+" 0 R").join(" ")+" >>"):"";
+  objs.push("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 "+pdfNum(pageW)+" "+pdfNum(pageH)+"]"
+    +" /TrimBox [0 0 "+pdfNum(pageW)+" "+pdfNum(pageH)+"]"
+    +" /Resources << /ProcSet [/PDF]"+gsRefs+" >> /Contents 4 0 R >>");
+  objs.push("<< /Length "+stream.length+" >>\nstream\n"+stream+"\nendstream");
+  objs.push("<< /Title "+pdfTextStr(title)+" /Producer (Bitmap2Vector) /Creator (Bitmap2Vector) /CreationDate ("+pdfDateStr(new Date())+") >>");
+  gsList.forEach(g=>objs.push("<< /Type /ExtGState /ca "+pdfNum(g.ca,3)+" /CA "+pdfNum(g.CA,3)+" >>"));
+  return {
+    bytes:assemblePdf(objs),
+    colors:palette.size,
+    hexes:Array.from(palette),
+    shapes:shapes,
+    wmm:Math.round(pageW*25.4/72*10)/10,
+    hmm:Math.round(pageH*25.4/72*10)/10
+  };
 }
 cmykBtn.addEventListener("click",()=>{
   const svgEl=svgPreview.querySelector("svg");
-  if(!svgEl)return;
-  const s=new XMLSerializer();
-  let svgStr=s.serializeToString(svgEl);
-  if(!svgStr.match(/xmlns="http:\/\/www\.w3\.org\/2000\/svg"/)) svgStr=svgStr.replace(/<svg/,'<svg xmlns="http://www.w3.org/2000/svg"');
-  const res=toCmykSvg(svgStr);
-  if(!res){ setStatus("CMYK 导出失败：SVG 解析异常","error"); return; }
-  const xml='<?xml version="1.0" encoding="UTF-8"?>\n'
-    +'<!-- Bitmap2Vector CMYK export | '+res.colors+' colors, TAC<=300% -->\n'
-    +'<!-- 每个图形同时带有: fill 回退色 / ICC 色(icc-color CMYK) / 设备CMYK(device-cmyk) -->\n'
-    +res.svg;
-  const b=new Blob([xml],{type:"image/svg+xml"});
-  const u=URL.createObjectURL(b);
+  if(!svgEl){ setStatus("还没有矢量结果，先点转换","error"); return; }
+  let mm=parseFloat(printWidthMm.value);
+  if(!isFinite(mm)||mm<5) mm=100;
+  if(mm>5000) mm=5000;
+  const base=currentFile?currentFile.name.replace(/\.[^.]+$/,""):"output";
+  const res=buildPrintPdf(svgEl,mm,base);
+  if(!res){ setStatus("PDF 导出失败：读不到图形或尺寸","error"); return; }
+  const u=URL.createObjectURL(new Blob([res.bytes],{type:"application/pdf"}));
   const a=document.createElement("a");
-  a.download=`${currentFile?currentFile.name.replace(/\.[^.]+$/,""):"output"}-印刷版-CMYK.svg`;
-  a.href=u;document.body.appendChild(a);a.click();document.body.removeChild(a);
+  a.download=base+"-印刷版.pdf";
+  a.href=u;
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
   setTimeout(()=>URL.revokeObjectURL(u),5000);
-  setStatus(`CMYK 版 SVG 已导出：${res.colors} 个颜色已转为 CMYK 值（含 ICC 与 device-cmyk，总墨量≤300%）`,"success");
+  setStatus("印刷 PDF 已导出："+res.wmm+"×"+res.hmm+" mm · DeviceCMYK 四色 · "+res.colors+" 色 · "+res.shapes+" 个图形","success");
 });
 
 // ============ EDITOR ============

@@ -1,0 +1,99 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
+<iframe id="site" src="index.html" style="width:1300px;height:700px"></iframe>
+<pre id="log">boot...</pre>
+<script>
+const log=[];function p(s){log.push(s);document.getElementById('log').textContent=log.join('\n');}
+window.addEventListener('load',async()=>{
+  const w=document.getElementById('site').contentWindow,doc=w.document;
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  for(let t=0;t<200;t++){if(w.window&&w.window.Image)break;await wait(50);}await wait(700);
+  try{
+    // 造一张三色测试图（蓝底 + 白条纹 + 红三角）
+    const cv=document.createElement('canvas');cv.width=800;cv.height=421;
+    const x=cv.getContext('2d');
+    x.fillStyle='#022365';x.fillRect(0,0,800,421);
+    x.fillStyle='#ffffff';
+    for(let i=0;i<7;i++) x.fillRect(0,40+i*56,800,24);
+    x.fillStyle='#bc0c3d';x.beginPath();x.moveTo(0,0);x.lineTo(260,0);x.lineTo(0,180);x.closePath();x.fill();
+    x.fillStyle='#ffffff';x.beginPath();x.arc(590,215,120,0,Math.PI*2);x.fill();
+    x.fillStyle='#022365';x.beginPath();x.arc(590,215,72,0,Math.PI*2);x.fill();
+    const blob=await new Promise(r=>cv.toBlob(r,'image/png'));
+    const inp=doc.getElementById('fileInput');
+    const d=new w.DataTransfer();d.items.add(new w.File([blob],'测试图.png',{type:'image/png'}));
+    inp.files=d.files;inp.dispatchEvent(new w.Event('change',{bubbles:true}));
+    // 等图片真正加载完（异步解码 + 可能的白底重建），不要用固定延时
+    for(let t=0;t<300;t++){
+      if(!doc.getElementById('convertBtn').disabled) break;
+      await wait(100);
+    }
+    await wait(300);
+    p('印刷宽度默认值(自动300dpi反推): '+doc.getElementById('printWidthMm').value+' mm');
+    doc.getElementById('numberOfColors').value='3';
+    doc.getElementById('lineFilter').value='2';   // 平滑 → 会产生 Q 二次贝塞尔
+    doc.getElementById('convertBtn').click();
+    let st='';
+    for(let t=0;t<200;t++){st=(doc.querySelector('.status')||{}).textContent||'';if(st.includes('完成')||st.includes('失败'))break;await wait(400);}
+    p('转换: '+st);
+    const svgEl=doc.querySelector('#svgPreview svg');
+    doc.getElementById('printWidthMm').value='100';
+    const res=w.eval('buildPrintPdf')(svgEl,100,'测试图');
+    if(!res){p('buildPrintPdf 返回 null');p('DONE');return;}
+    const b=res.bytes;
+    const head=String.fromCharCode.apply(null,b.slice(0,9));
+    const tail=String.fromCharCode.apply(null,b.slice(b.length-20));
+    p('返回: 颜色='+res.colors+' 图形='+res.shapes+' 尺寸='+res.wmm+'x'+res.hmm+'mm 字节='+b.length+' 调色板='+res.hexes.join(','));
+    p('文件头: '+JSON.stringify(head)+'  文件尾含%%EOF: '+tail.includes('%%EOF'));
+    const txt=[];for(let i=0;i<b.length;i++)txt.push(String.fromCharCode(b[i]));
+    const s=txt.join('');
+    // 结构自检：xref 里每个偏移量是否真的指向 "n 0 obj"
+    const m=s.match(/startxref\s+(\d+)/);
+    const xs=parseInt(m[1]);
+    p('startxref='+xs+' -> '+JSON.stringify(s.slice(xs,xs+4)));
+    const xr=s.slice(xs).split('\n').filter(l=>/^\d{10} 00000 n $/.test(l));
+    let okOff=0,badOff=[];
+    xr.forEach((l,i)=>{
+      const off=parseInt(l.slice(0,10));
+      if(s.slice(off,off+((i+1)+' 0 obj').length)===(i+1)+' 0 obj') okOff++; else badOff.push(i+1+'@'+off+':'+JSON.stringify(s.slice(off,off+12)));
+    });
+    p('xref 偏移校验: '+okOff+'/'+xr.length+' 正确'+(badOff.length?(' ❌ '+badOff.join(' ')):' ✅'));
+    const stream=s.slice(s.indexOf('stream\n')+7,s.lastIndexOf('\nendstream'));
+    p('内容流长度='+stream.length+' /Length 声明='+s.match(/\/Length (\d+)/)[1]+' 一致:'+(stream.length===parseInt(s.match(/\/Length (\d+)/)[1])));
+    p('MediaBox: '+s.match(/\/MediaBox \[[^\]]+\]/)[0]);
+    p('DeviceCMYK 填充色操作数(k)='+(stream.match(/[\d.]+ [\d.]+ [\d.]+ [\d.]+ k/g)||[]).length
+      +' 描边(K)='+(stream.match(/[\d.]+ [\d.]+ [\d.]+ [\d.]+ K/g)||[]).length);
+    p('路径算子统计: m='+(stream.match(/(^|\n)m /g)||[]).length
+      +' c='+(stream.match(/(^|\n)c /g)||[]).length
+      +' l='+(stream.match(/(^|\n)l /g)||[]).length
+      +' h='+(stream.match(/(^|\n)h/g)||[]).length
+      +' f='+(stream.match(/(^|\n)f\*?(\n|$)/g)||[]).length
+      +' B='+(stream.match(/(^|\n)B\*?(\n|$)/g)||[]).length);
+    p('是否有 NaN/undefined: '+(/NaN|undefined|e[+-]\d/.test(s)?'❌ 有':'✅ 无'));
+    // 几何校验：内容流用 cm 矩阵做 mm 缩放 + y 翻转，故流内坐标应保持 SVG 原值
+    const iw=parseFloat(svgEl.getAttribute('width')), ih=parseFloat(svgEl.getAttribute('height'));
+    const cml=stream.match(/([-\d.]+) 0 0 ([-\d.]+) ([-\d.]+) ([-\d.]+) cm/);
+    const sc2=(100*72/25.4)/iw;
+    const okCm=cml && Math.abs(+cml[1]-sc2)<1e-4 && Math.abs(+cml[2]+sc2)<1e-4 && Math.abs(+cml[4]-ih*sc2)<0.01;
+    p('cm 矩阵: '+cml[0]+'  → 期望 s='+sc2.toFixed(6)+' f='+(ih*sc2).toFixed(3)+' '+(okCm?'✅':'❌'));
+    // 单位测试：Q 二次贝塞尔 → c 三次（PDF 无 Q 算子）
+    const qt=w.eval('svgPathToPdfOps')('M 0 0 Q 60 0 60 60 L 0 60 Z');
+    p('Q→C 单元测试: '+JSON.stringify(qt)+' '+(qt.length===4&&qt[1].startsWith('c 40 0 60 20 60 60')?'✅':'❌'));
+    // SVG 内实际填充色统计
+    const tally={};
+    svgEl.querySelectorAll('path,rect,circle,ellipse,polygon,polyline,line').forEach(el=>{
+      const cs=w.getComputedStyle(el);
+      const key=cs.fill+'|'+cs.stroke+'|'+cs.opacity+'|'+cs.display;
+      tally[key]=(tally[key]||0)+1;
+    });
+    p('SVG 元素数: '+svgEl.querySelectorAll('path').length+' 种组合: '+Object.keys(tally).length);
+    Object.keys(tally).slice(0,8).forEach(k=>p('   '+k+' ×'+tally[k]));
+    let b64='';const CH=4096;
+    for(let i=0;i<b.length;i+=CH) b64+=String.fromCharCode.apply(null,b.subarray(i,i+CH));
+    p('BASE64:'+w.btoa(b64));
+    p('抽样 3 行: '+JSON.stringify(stream.split('\n').slice(8,11)));
+    // 前 400 字节打印，便于人工核对头部结构
+    p('PDF 头部片段: '+JSON.stringify(s.slice(0,320)));
+    window.__pdf=b;
+  }catch(e){p('EXC: '+(e&&e.message||e))}
+  p('DONE');
+});
+</script></body></html>
