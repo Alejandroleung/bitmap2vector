@@ -191,7 +191,7 @@ body::before{
   background:#EFF5FF;border:1px solid #DCE8FF;
 }
 .preview-box{
-  position:relative;flex:1;min-height:390px;
+  position:relative;flex:0 0 auto;height:430px;
   border-radius:var(--r);overflow:auto;
   border:1px solid var(--line);
   background-color:#FCFCFD;
@@ -528,7 +528,7 @@ input[type="range"]::-moz-range-thumb{
 }
 @media(max-width:1380px){
   .canvas-grid{grid-template-columns:minmax(0,1fr)}
-  .preview-box,.preview-box .placeholder{min-height:320px}
+  .preview-box{height:320px}.preview-box .placeholder{min-height:0}
 }
 @media(max-width:1080px){
   .workspace{grid-template-columns:minmax(0,1fr);padding:18px}
@@ -543,7 +543,7 @@ input[type="range"]::-moz-range-thumb{
   .actions{grid-template-columns:1fr}
   .tips-grid{grid-template-columns:1fr}
   .tips{padding:0 14px 34px}
-  .preview-box,.preview-box .placeholder{min-height:250px}
+  .preview-box{height:250px}.preview-box .placeholder{min-height:0}
 }
 </style>
 </head>
@@ -907,6 +907,15 @@ uploadArea.addEventListener("drop",e=>{e.preventDefault();uploadArea.classList.r
 fileInput.addEventListener("change",e=>{if(e.target.files.length)handleFile(e.target.files[0])});
 zoomRange.addEventListener("input",()=>updateZoom(parseInt(zoomRange.value)));
 fitBtn.addEventListener("click",()=>{zoomRange.value=100;updateZoom(100)});
+// 原图框滚轮缩放：与缩放滑块联动（10%–500%）
+originalPreview.addEventListener("wheel",e=>{
+  if(!originalPreview.querySelector(".original-img-wrapper")) return;
+  e.preventDefault();
+  const cur=parseInt(zoomRange.value)||100;
+  const step=e.deltaY<0?1.2:0.8;
+  const v=Math.max(10,Math.min(500,Math.round(cur*step)));
+  zoomRange.value=v; updateZoom(v);
+},{passive:false});
 
 function handleFile(file){
   if(!file.type.startsWith("image/")){setStatus("请上传图片文件","error");return}
