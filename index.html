@@ -1283,18 +1283,90 @@ function parseSvgColor(str){
   if(rgb) return [+rgb[1],+rgb[2],+rgb[3]];
   const hex=str.match(/#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})/);
   if(hex) return [parseInt(hex[1],16),parseInt(hex[2],16),parseInt(hex[3],16)];
-  return null;
+  const named={black:[0,0,0],white:[255,255,255],red:[255,0,0],green:[0,128,0],blue:[0,0,255],gray:[128,128,128],grey:[128,128,128]};
+  const key=String(str).trim().toLowerCase();
+  return named[key]||null;
 }
-function rgbFillToCmyk(svgStr){
-  return svgStr.replace(/(<(?:path|rect|circle|ellipse|polygon|polyline|line)[^>]*?)(\/?>)/gi,(match,pre,close)=>{
-    const out=[pre];
-    const fillM=pre.match(/fill="([^"]*)"/i);
-    if(fillM){const c=parseSvgColor(fillM[1]);if(c){const cmyk=rgbToCmyk(c[0],c[1],c[2]);out.push(` data-cmyk-fill="C${cmyk.c}M${cmyk.m}Y${cmyk.y}K${cmyk.k}"`)}}
-    const strokeM=pre.match(/stroke="([^"]*)"/i);
-    if(strokeM){const c=parseSvgColor(strokeM[1]);if(c){const cmyk=rgbToCmyk(c[0],c[1],c[2]);out.push(` data-cmyk-stroke="C${cmyk.c}M${cmyk.m}Y${cmyk.y}K${cmyk.k}"`)}}
-    out.push(close);
-    return out.join("");
+// 印刷用 CMYK 换算：在黑板补偿基础上限制总墨量 TAC ≤ 300%（防止油墨堆积）
+function rgbToCmykPrint(r,g,b){
+  const c0=rgbToCmyk(r,g,b);
+  let {c,m,y,k}=c0;
+  const tac=c+m+y+k;
+  if(tac>300 && (c+m+y)>0){
+    const scale=(300-k)/(c+m+y);
+    c=Math.round(c*scale); m=Math.round(m*scale); y=Math.round(y*scale);
+  }
+  return {c,m,y,k};
+}
+// 把 SVG 改写成带 CMYK 颜色值的版本。
+// SVG 规范里只有 sRGB，CMYK 通过两种扩展写法携带：
+//   fill:#RRGGBB                          ← 浏览器/普通查看器的回退色（必须保留，否则会显示黑色）
+//   fill:#RRGGBB icc-color(CMYK, c,m,y,k) ← SVG 1.1 标准 ICC 写法（Illustrator/Scribus/RIP 可识别）
+//   fill:device-cmyk(c m y k)             ← SVG2/CSS Color4 写法（新版工具可识别）
+// 不支持的渲染器只丢弃这三条声明，回退到元素上的 fill 属性，画面不受影响。
+function toCmykSvg(svgStr){
+  const doc=new DOMParser().parseFromString(svgStr,"image/svg+xml");
+  if(doc.querySelector("parsererror")) return null;
+  const NS="http://www.w3.org/2000/svg";
+  const svg=doc.documentElement;
+  // 1) 声明 CMYK 色彩配置文件（供识别 ICC 的软件使用）
+  let defs=svg.querySelector("defs");
+  if(!defs){ defs=doc.createElementNS(NS,"defs"); svg.insertBefore(defs,svg.firstChild); }
+  if(!defs.querySelector("color-profile[name='CMYK']")){
+    const cp=doc.createElementNS(NS,"color-profile");
+    cp.setAttribute("name","CMYK");
+    cp.setAttribute("rendering-intent","relative-colorimetric");
+    defs.appendChild(cp);
+  }
+  const num=v=>{const s=(v/100).toFixed(4).replace(/0+$/,"").replace(/\.$/,"");return s===""?"0":s;};
+  const palette=new Map();
+  const shapes=svg.querySelectorAll("path,rect,circle,ellipse,polygon,polyline,line,text,tspan,g");
+  shapes.forEach(el=>{
+    const styleStr=el.getAttribute("style")||"";
+    ["fill","stroke"].forEach(prop=>{
+      // 取生效值：style 优先，其次属性
+      let val=el.getAttribute(prop)||"";
+      const sm=styleStr.match(new RegExp("(?:^|;)\\s*"+prop+"\\s*:\\s*([^;]+)"));
+      if(sm) val=sm[1].trim();
+      if(!val||val==="none"||/^url\(/i.test(val)||val==="transparent") return;
+      const rgbc=parseSvgColor(val);
+      if(!rgbc) return;
+      const cmyk=rgbToCmykPrint(rgbc[0],rgbc[1],rgbc[2]);
+      const hex="#"+rgbc.map(v=>v.toString(16).padStart(2,"0")).join("");
+      palette.set(hex,cmyk);
+      // 保留原 fill 属性做回退
+      el.setAttribute(prop,hex);
+      // 重写 style：去掉旧的 fill/stroke 声明，再按"RGB 回退 → icc-color → device-cmyk"顺序写入
+      let rest=(el.getAttribute("style")||"")
+        .replace(new RegExp("(^|;)\\s*"+prop+"\\s*:[^;]*","g"),"$1")
+        .replace(/^;+|;+$/g,"").trim();
+      const decls=[
+        `${prop}:${hex}`,
+        `${prop}:${hex} icc-color(CMYK, ${num(cmyk.c)}, ${num(cmyk.m)}, ${num(cmyk.y)}, ${num(cmyk.k)})`,
+        `${prop}:device-cmyk(${num(cmyk.c)} ${num(cmyk.m)} ${num(cmyk.y)} ${num(cmyk.k)})`,
+      ].join(";");
+      el.setAttribute("style",(rest?rest+";":"")+decls);
+      el.setAttribute(`data-cmyk-${prop}`,`C${cmyk.c} M${cmyk.m} Y${cmyk.y} K${cmyk.k}`);
+    });
   });
+  // 2) 元数据：把用到的每个颜色的 CMYK 值记进文件，方便印前核对
+  //    注意：xmlns:cmyk 必须用 setAttributeNS 声明，否则 XMLSerializer 会把前缀重写成 ns1
+  const CMYKNS="https://bitmap2vector.local/cmyk";
+  const md=doc.createElementNS(NS,"metadata");
+  const root=doc.createElementNS(CMYKNS,"cmyk:palette");
+  root.setAttributeNS("http://www.w3.org/2000/xmlns/","xmlns:cmyk",CMYKNS);
+  root.setAttribute("color-space","CMYK");
+  root.setAttribute("tac-limit","300");
+  palette.forEach((v,hex)=>{
+    const e=doc.createElementNS(CMYKNS,"cmyk:color");
+    e.setAttribute("hex",hex);
+    e.setAttribute("c",v.c); e.setAttribute("m",v.m); e.setAttribute("y",v.y); e.setAttribute("k",v.k);
+    e.setAttribute("tac",v.c+v.m+v.y+v.k);
+    root.appendChild(e);
+  });
+  md.appendChild(root);
+  svg.insertBefore(md,defs.nextSibling);
+  return {svg:new XMLSerializer().serializeToString(svg), colors:palette.size};
 }
 cmykBtn.addEventListener("click",()=>{
   const svgEl=svgPreview.querySelector("svg");
@@ -1302,15 +1374,19 @@ cmykBtn.addEventListener("click",()=>{
   const s=new XMLSerializer();
   let svgStr=s.serializeToString(svgEl);
   if(!svgStr.match(/xmlns="http:\/\/www\.w3\.org\/2000\/svg"/)) svgStr=svgStr.replace(/<svg/,'<svg xmlns="http://www.w3.org/2000/svg"');
-  svgStr=rgbFillToCmyk(svgStr);
-  const xml='<?xml version="1.0" encoding="UTF-8"?>\n<!-- CMYK EXPORT - Process colors -->\n'+svgStr;
+  const res=toCmykSvg(svgStr);
+  if(!res){ setStatus("CMYK 导出失败：SVG 解析异常","error"); return; }
+  const xml='<?xml version="1.0" encoding="UTF-8"?>\n'
+    +'<!-- Bitmap2Vector CMYK export | '+res.colors+' colors, TAC<=300% -->\n'
+    +'<!-- 每个图形同时带有: fill 回退色 / ICC 色(icc-color CMYK) / 设备CMYK(device-cmyk) -->\n'
+    +res.svg;
   const b=new Blob([xml],{type:"image/svg+xml"});
   const u=URL.createObjectURL(b);
   const a=document.createElement("a");
   a.download=`${currentFile?currentFile.name.replace(/\.[^.]+$/,""):"output"}-印刷版-CMYK.svg`;
   a.href=u;document.body.appendChild(a);a.click();document.body.removeChild(a);
   setTimeout(()=>URL.revokeObjectURL(u),5000);
-  setStatus("CMYK 版 SVG 已导出（含 data-cmyk-fill / data-cmyk-stroke 属性）","success");
+  setStatus(`CMYK 版 SVG 已导出：${res.colors} 个颜色已转为 CMYK 值（含 ICC 与 device-cmyk，总墨量≤300%）`,"success");
 });
 
 // ============ EDITOR ============
