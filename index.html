@@ -1236,20 +1236,20 @@ async function doConvert(){
   convertBtn.disabled=true;
   setStatus("正在转换...","info");
   try{
+    const lt=parseInt($("lineFilter").value);
+    // 平滑拟合阈值：ImageTracer 的 ltres/qtres 与"允许的边缘偏差²"直接比较。
+    // 取太小（如 0.5，仅容忍 0.7px 偏差）会把每个像素台阶和 JPEG 边缘噪声原样描成锯齿。
+    // ltres 控制直线段拟合（越低越贴像素格），qtres 控制曲线拟合；pathomit 丢弃短碎路径。
     const opts={
       numberofcolors:+$("numberOfColors").value||16,
       minarea:+$("minArea").value||1,
       blurradius:0,
-      linefilter:false,quadfilter:false,
-      ltres:0.5+(+$("lineFilter").value)*0.5,
-      qtres:0.5+(+$("lineFilter").value)*0.5,
+      linefilter:lt===0,            // 剔除少于 3 段的碎屑路径（仅精细档）
+      ltres:[1.0,1.4,2.0,3.0][lt]||1.4,
+      qtres:[1.3,1.8,2.6,4.0][lt]||1.8,
+      pathomit:[4,8,16,32][lt]||8,  // 丢弃点数少于该值的短路径（锯齿碎屑）
       scale:1,
-      simplifytolerance:0.2+(+$("lineFilter").value)*0.4,
     };
-    const lt=parseInt($("lineFilter").value);
-    if(lt===0){opts.linefilter=true;opts.quadfilter=true}
-    else if(lt===2){opts.linefilter=true;opts.quadfilter=false}
-    else if(lt===3){opts.linefilter=false;opts.quadfilter=true}
 
     const r=new FileReader();
     const du=await new Promise(rl=>{r.onload=()=>rl(r.result);r.readAsDataURL(currentFile)});
