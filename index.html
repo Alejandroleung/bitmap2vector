@@ -1071,13 +1071,47 @@ function quantizeToColors(imgData, n){
   const pal=keep.map(k=>[Math.round(cents[k][0]),Math.round(cents[k][1]),Math.round(cents[k][2])]);
   // 色箱 → 最近主色的查找表，避免逐像素做 N 次距离计算
   const lut=new Uint8Array(BINS);
+  // 边缘抗锯齿混色吸收：白底深蓝字之类的边缘混色（灰蓝）在感知空间落在两主色连线上，
+  // 而第三个主色（金色）可能离这条连线中段更近 → 最近邻会把边缘错分给金色，形成一圈杂色描边。
+  // 对"落在某两主色连线上的颜色"，直接归到两端中更近的一端。仅主色 ≤16 时启用（照片渐变不受影响）。
+  const PA=pal.length;
+  let segs=null;
+  if(PA>1 && PA<=16){
+    segs=[];
+    for(let i=0;i<PA;i++)for(let j=i+1;j<PA;j++){
+      const A=pal[i],B=pal[j];
+      const ax=B[0]-A[0],ay=B[1]-A[1],az=B[2]-A[2];
+      const a2=ax*ax+ay*ay+az*az;
+      if(a2>=400) segs.push([A[0],A[1],A[2],ax,ay,az,a2,i,j]);   // 两主色太接近的连线无意义
+    }
+  }
   for(let b=0;b<BINS;b++){
     const r=(((b>>10)&31)<<3)+4, g=(((b>>5)&31)<<3)+4, bl=((b&31)<<3)+4;
     let best=0, bd=Infinity;
-    for(let k=0;k<pal.length;k++){
+    for(let k=0;k<PA;k++){
       const dr=r-pal[k][0], dg=g-pal[k][1], db=bl-pal[k][2];
       const dist=dr*dr*0.299+dg*dg*0.587+db*db*0.114;
       if(dist<bd){bd=dist;best=k}
+    }
+    // 只检查"真实出现过的颜色"且明显不属于任何主色（bd 阈值≈欧氏 35px）
+    if(segs && cnt[b]>0 && bd>400){
+      let hitSeg=-1, hitPerp=48, hitT=0;
+      for(let s=0;s<segs.length;s++){
+        const sg=segs[s];
+        const vx=r-sg[0], vy=g-sg[1], vz=bl-sg[2];
+        const t=(vx*sg[3]+vy*sg[4]+vz*sg[5])/sg[6];
+        if(t<0.12||t>0.88) continue;                       // 靠近端点的本就归端点
+        const px=sg[0]+sg[3]*t, py=sg[1]+sg[4]*t, pz=sg[2]+sg[5]*t;
+        const dd=Math.sqrt((r-px)*(r-px)+(g-py)*(g-py)+(bl-pz)*(bl-pz));
+        if(dd<hitPerp){ hitPerp=dd; hitSeg=s; hitT=t; }
+      }
+      if(hitSeg>=0){
+        const sg=segs[hitSeg], i=sg[7], j=sg[8];
+        const dI=(r-pal[i][0])*(r-pal[i][0])*0.299+(g-pal[i][1])*(g-pal[i][1])*0.587+(bl-pal[i][2])*(bl-pal[i][2])*0.114;
+        const dJ=(r-pal[j][0])*(r-pal[j][0])*0.299+(g-pal[j][1])*(g-pal[j][1])*0.587+(bl-pal[j][2])*(bl-pal[j][2])*0.114;
+        best=(dI<=dJ)?i:j;
+        bd=0;
+      }
     }
     lut[b]=best;
   }
