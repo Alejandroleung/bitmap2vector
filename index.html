@@ -2311,6 +2311,56 @@ async function acquireUpscaler(factor){
   return upscalerInstance;
 }
 
+// —— 内存自适应的放大：浏览器可用内存不足时（Array buffer allocation failed / OOM），
+// 逐级降级而不是直接把错误抛给用户。
+// 阶梯：原尺寸 → 分块 128 + 重建模型 → 输入缩到 75% → 输入缩到 50%。
+function isAllocError(e){
+  const m=(e&&e.message)||"";
+  return /allocat|out of memory|Array buffer|内存|OOM/i.test(m);
+}
+
+// 按比例缩小图片（只用于降级重试，用高质量重采样）
+function shrinkImage(img,scale){
+  const sw=img.naturalWidth||img.width||1, sh=img.naturalHeight||img.height||1;
+  const w=Math.max(1,Math.round(sw*scale)), h=Math.max(1,Math.round(sh*scale));
+  const c=document.createElement("canvas");c.width=w;c.height=h;
+  const x=c.getContext("2d");
+  x.imageSmoothingEnabled=true;
+  try{x.imageSmoothingQuality="high"}catch(e){}
+  x.drawImage(img,0,0,w,h);
+  return c;
+}
+
+async function upscaleWithMemoryFallback(up,img,baseOpts){
+  const steps=[
+    {scale:1,   patch:0,   rebuild:false, tip:""},
+    {scale:1,   patch:128, rebuild:true,  tip:"改用 128px 分块重试"},
+    {scale:0.75,patch:128, rebuild:true,  tip:"输入缩到 75% 重试"},
+    {scale:0.5, patch:128, rebuild:true,  tip:"输入缩到 50% 重试"},
+  ];
+  let lastErr=null;
+  for(let i=0;i<steps.length;i++){
+    const st=steps[i];
+    try{
+      let input=img;
+      if(st.scale<1) input=shrinkImage(img,st.scale);
+      if(st.rebuild){
+        setStatus(`内存不足，正在${st.tip}...`,"info");
+        upscalerInstance=null;              // 丢掉可能已损坏的实例，重新取模型
+        up=await acquireUpscaler(2);
+      }
+      const opts=Object.assign({},baseOpts);
+      if(st.patch){opts.patchSize=st.patch;opts.padding=Math.max(2,Math.round(st.patch/32));}
+      const result=await up.upscale(input,opts);
+      return {result:result, scale:st.scale, attempt:i};
+    }catch(e){
+      lastErr=e;
+      if(!isAllocError(e)) throw e;         // 非内存类错误：不浪费时间重试
+    }
+  }
+  throw lastErr;
+}
+
 upscaleBtn.addEventListener("click",async()=>{
   if(!currentFile) return;
   upscaleBtn.disabled=true;
@@ -2325,6 +2375,7 @@ upscaleBtn.addEventListener("click",async()=>{
     upscaleProgressBar.style.width="30%";
     setStatus("模型加载完成，正在放大...","info");
     const factor=parseInt(upscaleFactor.value)||2;
+    lastModelSource="";                       // 每次点击重置诊断来源，避免显示上一次的旧值
     let up=await acquireUpscaler(factor);
     upscaleProgressBar.style.width="50%";
     const r=new FileReader();
@@ -2339,13 +2390,17 @@ upscaleBtn.addEventListener("click",async()=>{
       fx.drawImage(img,0,0);
       img=fc;
     }
+    const iw=img.naturalWidth||img.width||0, ih=img.naturalHeight||img.height||0;
+    if(iw*ih>40e6){
+      throw new Error(`图片太大（${iw}×${ih}），放大需要约 ${(iw*ih*3*4/1024/1024/1024).toFixed(1)}GB 内存。请先把图片缩到 4000px 以内再试`);
+    }
     upscaleProgressBar.style.width="60%";
-    let result;
+    let out;
     try{
-      result=await up.upscale(img,mkUpscaleOpts(img));
+      out=await upscaleWithMemoryFallback(up,img,mkUpscaleOpts(img));
     }catch(e1){
-      // 模型来源可用但权重拉取失败时，退回内嵌模型数据再试一次
-      if(window.__BTV_MODEL_DATA){ throw e1; }
+      // 非内存错误（多为模型权重拉取失败）：退回内嵌模型数据再试一次
+      if(window.__BTV_MODEL_DATA || isAllocError(e1)) throw e1;
       setStatus("模型文件读取失败，正在切换本站内置模型...","info");
       const ok=await loadEmbeddedModelData();
       const def=ok?buildEmbeddedModelDef():null;
@@ -2353,14 +2408,25 @@ upscaleBtn.addEventListener("click",async()=>{
       upscalerInstance=new window.Upscaler({model:def});
       up=upscalerInstance;
       lastModelSource="内嵌数据(vendor/model-data.js)";
-      result=await up.upscale(img,mkUpscaleOpts(img));
+      out=await upscaleWithMemoryFallback(up,img,mkUpscaleOpts(img));
     }
+    let result=out.result;
+    const shrunk=out.scale<1?out.scale:1;     // 实际用的输入比例（<1 说明被降采样了）
+    let actualFactor=factor;
     if(factor>=4){
       // 模型原生 2×：4× 需要连续跑两遍（第二遍吃第一遍的输出）
       setStatus("2× 完成，正在第二遍放大到 4×...","info");
       upscaleProgressBar.style.width="75%";
       const img2=await new Promise((rl,rj)=>{const i=new Image;i.onload=()=>rl(i);i.onerror=rj;i.src=result});
-      result=await up.upscale(img2,mkUpscaleOpts(img2));
+      try{
+        const out2=await upscaleWithMemoryFallback(up,img2,mkUpscaleOpts(img2));
+        result=out2.result;
+      }catch(e2){
+        // 第二遍失败（通常是内存不够）：保留 2× 结果，不让整次操作白费
+        if(!isAllocError(e2)) throw e2;
+        actualFactor=2;
+        setStatus("4× 第二遍内存不足，已保留 2× 结果","info");
+      }
     }
     upscaleProgressBar.style.width="90%";
     currentImgDataUrl=result;
@@ -2387,7 +2453,7 @@ upscaleBtn.addEventListener("click",async()=>{
       svgZoomControls.style.display="none"; paletteSection.style.display="none";
       drawHistory=[];
       upscaleProgressBar.style.width="100%";
-      setStatus(`AI 放大完成！${factor}× (${resultImg.width}×${resultImg.height}px)，正在自动转换矢量图...`,"success");
+      setStatus(`AI 放大完成！${actualFactor}× (${resultImg.width}×${resultImg.height}px)${shrunk<1?` · 内存不足已自动按 ${Math.round(shrunk*100)}% 输入尺寸放大`:""}，正在自动转换矢量图...`,"success");
       upscaleBtn.innerHTML=origText;
       upscaleBtn.disabled=false;
       convertBtn.disabled=false; aiBtn.disabled=false;
@@ -2397,7 +2463,8 @@ upscaleBtn.addEventListener("click",async()=>{
     };
     resultImg.src=result;
   }catch(err){
-    setStatus(`AI 放大失败: ${err.message}${lastModelSource?`（模型来源: ${lastModelSource}）`:"（未能取得模型）"}`,"error");
+    const hint=isAllocError(err)?`。浏览器可用内存不足：已自动尝试分块与降采样仍未成功，请关闭其他标签页/程序后重试，或先把图片缩到 3000px 以内`:"";
+    setStatus(`AI 放大失败: ${err.message}${hint}${lastModelSource?`（模型来源: ${lastModelSource}）`:"（未能取得模型）"}`,"error");
     upscaleBtn.innerHTML=origText;
     upscaleBtn.disabled=false;
     upscaleProgress.style.display="none";
