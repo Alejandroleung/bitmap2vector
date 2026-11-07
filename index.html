@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Vectorize Pro - 位图转矢量图</title>
 <script src="https://cdn.jsdelivr.net/npm/imagetracerjs@1.2.6/imagetracer_v1.2.6.min.js"></script>
+<script src="vendor/vm-tracer.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
@@ -683,6 +684,13 @@ input[type="range"]::-moz-range-thumb{
           </select>
         </div>
         <div class="field full">
+          <label title="VM 精度引擎：亚像素边缘定位 + 曲率先验平滑 + 三次贝塞尔拟合；经典引擎：ImageTracer 像素描摹">描摹引擎</label>
+          <select id="traceEngine">
+            <option value="vm" selected>VM 精度引擎（亚像素 · 三次曲线）</option>
+            <option value="classic">经典引擎（ImageTracer）</option>
+          </select>
+        </div>
+        <div class="field full">
           <label>最小面积 (px)</label>
           <input type="number" id="minArea" value="1" min="1" max="100">
         </div>
@@ -1278,6 +1286,10 @@ async function doConvert(){
     const sharpen=+$("sharpen").value;
     if(denoise||smooth||sharpen) applyEnhancements(imgData,denoise,smooth,sharpen);
 
+    // VM 引擎需要"未量化的原始抗锯齿像素"来反解覆盖率，先留一份副本
+    const engine=($("traceEngine")&&$("traceEngine").value)||"vm";
+    const origRGB=(engine==="vm")?new Uint8ClampedArray(imgData.data):null;
+
     // 主色量化：先按面积保留 N 种主色，其余并入最近主色（消除渐变/杂色）
     let qinfo=null;
     try{ qinfo=quantizeToColors(imgData,opts.numberofcolors); }catch(e){ qinfo=null; }
@@ -1289,9 +1301,41 @@ async function doConvert(){
     }
     cx.putImageData(imgData,0,0);
 
-    const st=performance.now();
-    const svg=ImageTracer.imagedataToSVG(imgData,opts);
-    const el=((performance.now()-st)/1000).toFixed(1);
+    let svg,el,engineNote="";
+    if(engine==="vm" && window.VMTracer){
+      // 量化器在"实际颜色数 <= N"时不返回调色板，这里按面积取最常见的颜色兜底
+      const paletteFromData=(data,maxN)=>{
+        const m=new Map();
+        for(let i=0;i<data.length;i+=4){
+          const k=(data[i]<<16)|(data[i+1]<<8)|data[i+2];
+          m.set(k,(m.get(k)||0)+1);
+        }
+        return Array.from(m.entries()).sort((a,b)=>b[1]-a[1]).slice(0,maxN)
+          .map(e=>[(e[0]>>16)&255,(e[0]>>8)&255,e[0]&255]);
+      };
+      const pal=(qinfo&&qinfo.palette&&qinfo.palette.length>=2)
+        ?qinfo.palette:paletteFromData(origRGB,opts.numberofcolors);
+      if(pal.length<2) throw new Error("颜色数量不足，无法描摹");
+      // 线条拟合四档 → 先验强度 / 角点阈值 / 贝塞尔误差容限
+      // （对应 ContourSmoother::prior_strengths、puncture_corner_thresh、BezierFitter::stat_thresh_final）
+      const vmOpts={
+        smoothPasses:[10,18,26,34][lt]||18,
+        prior:[0.28,0.38,0.48,0.58][lt]||0.38,
+        cornerThresh:[1.15,1.0,0.88,0.78][lt]||1.0,
+        bezierTol:[0.35,0.55,0.85,1.3][lt]||0.55,
+        minArea:Math.max(2,(+$("minArea").value||1)*4),
+        labelData:imgData,   // 量化器已处理过的离散分割结果（含过渡色吸收）
+      };
+      const t0=performance.now();
+      const res=window.VMTracer.trace(new ImageData(origRGB,imgData.width,imgData.height),pal,vmOpts);
+      svg=res.svg;
+      el=((performance.now()-t0)/1000).toFixed(1);
+      engineNote=` · VM 引擎 ${res.paths} 图形/${res.colors} 色`;
+    }else{
+      const st=performance.now();
+      svg=ImageTracer.imagedataToSVG(imgData,opts);
+      el=((performance.now()-st)/1000).toFixed(1);
+    }
     if(!svg||svg.length<50) throw new Error("结果为空");
     currentSvgStr=svg;
     originalSvgStr=svg;
@@ -1306,7 +1350,7 @@ async function doConvert(){
     editorPanel.classList.add("show");
     svgZoomControls.style.display="flex"; panX=0;panY=0; svgZoomRange.value=100; updateSvgZoom(100);
     initEditor();
-    setStatus(`完成！${kb} KB，${el}s${qinfo?` · 已归并为 ${qinfo.count} 种主色`:""}`,"success");
+    setStatus(`完成！${kb} KB，${el}s${engineNote}${qinfo?` · 已归并为 ${qinfo.count} 种主色`:""}`,"success");
   } catch(err){setStatus(`失败: ${err.message}`,"error")}
   finally{convertBtn.disabled=false}
 }
@@ -1417,8 +1461,8 @@ function svgPathToPdfOps(d){
       continue;
     }
     if(up==="L"){ const x=ax(rd()), y=ay(rd()); LN(x,y); cx=x; cy=y; prev="L"; hasCtrl=false; continue; }
-    if(up==="H"){ const x=ax(rd()); LN(x,N(cy)); cx=x; prev="H"; hasCtrl=false; continue; }
-    if(up==="V"){ const y=ay(rd()); LN(N(cx),y); cy=y; prev="V"; hasCtrl=false; continue; }
+    if(up==="H"){ const x=ax(rd()); LN(x,cy); cx=x; prev="H"; hasCtrl=false; continue; }
+    if(up==="V"){ const y=ay(rd()); LN(cx,y); cy=y; prev="V"; hasCtrl=false; continue; }
     if(up==="C"){
       const x1=ax(rd()), y1=ay(rd()), x2=ax(rd()), y2=ay(rd()), x=ax(rd()), y=ay(rd());
       CB(x1,y1,x2,y2,x,y); cx=x; cy=y; pcx=x2; pcy=y2; hasCtrl=true; prev="C"; continue;
@@ -1680,12 +1724,18 @@ function doFillPath(path){
   const changed=[];
   getSvgPaths().forEach(p=>{
     if(p.getAttribute("fill")===targetFill){
-      changed.push({path:p,oldFill:targetFill});
+      const oldStroke=p.getAttribute("stroke");
+      changed.push({path:p,oldFill:targetFill,oldStroke});
       p.setAttribute("fill",fillStr);
+      // VM 引擎的色层带同色 trapping 描边，改色时必须一起改，否则边缘留旧色
+      if(oldStroke && oldStroke!=="none") p.setAttribute("stroke",fillStr);
     }
   });
   if(changed.length){
-    const undoFn=()=>{changed.forEach(({path:p,oldFill:of})=>p.setAttribute("fill",of));buildLayers()};
+    const undoFn=()=>{changed.forEach(({path:p,oldFill:of,oldStroke:os})=>{
+      p.setAttribute("fill",of);
+      if(os!==null&&os!==undefined){ if(os==="none") p.removeAttribute("stroke"); else p.setAttribute("stroke",os); }
+    });buildLayers()};
     drawHistory.push(undoFn);
   }
   selectedPath=path;
@@ -1913,6 +1963,10 @@ $("applySmoothBtn").addEventListener("click",()=>{
   const tol=parseFloat($("smoothPath").value);
   if(tol===0){setStatus("平滑值设为 0 时不做简化","info");return}
   const oldD=selectedPath.getAttribute("d");
+  if(/[CcQqSsTtAa]/.test(oldD)){
+    setStatus("该路径含贝塞尔曲线（VM 引擎输出），路径简化请用「转换参数 → 线条拟合」调节","info");
+    return;
+  }
   simplifySvgPath(selectedPath,tol);
   drawHistory.push(()=>{selectedPath.setAttribute("d",oldD)});
   updateSvgString();
