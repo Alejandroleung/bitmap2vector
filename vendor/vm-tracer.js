@@ -192,48 +192,120 @@
     return contours;
   }
 
-  // ---------- B2. 曲率先验平滑（角点保护） ----------
+  // 估计离散标签图的边界破碎程度：边界像素里 8 邻域同色数 <=3 的比例。
+  // 撕裂噪声 / JPEG 振铃 / 超分伪影会让这个值明显升高，用来自动选择低通强度。
+  function estimateNoise(labels, W, H) {
+    var edge = 0, rough = 0, x, y, dx, dy, pp, lab, same;
+    for (y = 1; y < H - 1; y++) for (x = 1; x < W - 1; x++) {
+      pp = y * W + x; lab = labels[pp]; same = 0;
+      for (dy = -1; dy <= 1; dy++) for (dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        if (labels[(y + dy) * W + x + dx] === lab) same++;
+      }
+      if (same < 8) { edge++; if (same <= 3) rough++; }
+    }
+    return edge > 0 ? rough / edge : 0;
+  }
+
+  // ---------- B0. 覆盖率场低通 ----------
+  // 光栅化本身是低通过程。输入若是硬边位图 / JPEG / 超分伪影，场里只有 0/1 阶跃
+  // 加噪声，marching squares 会把每个像素台阶如实描成锯齿。先做可分离二项式低通，
+  // 让 0.5 等值线落到亚像素位置——等价于论文里的"连续边界观测"。
+  function blurField(field, W, H, iters) {
+    var tmp = new Float32Array(field.length), x, y, row;
+    for (var it = 0; it < iters; it++) {
+      for (y = 0; y < H; y++) {
+        row = y * W;
+        for (x = 0; x < W; x++)
+          tmp[row + x] = (field[row + (x > 0 ? x - 1 : 0)] + 2 * field[row + x] +
+            field[row + (x < W - 1 ? x + 1 : 0)]) * 0.25;
+      }
+      for (y = 0; y < H; y++) {
+        row = y * W;
+        var up = (y > 0 ? y - 1 : 0) * W, dn = (y < H - 1 ? y + 1 : 0) * W;
+        for (x = 0; x < W; x++)
+          field[row + x] = (tmp[up + x] + 2 * tmp[row + x] + tmp[dn + x]) * 0.25;
+      }
+    }
+    return field;
+  }
+
+  // 按弧长均匀重采样：marching squares 在台阶处点密、直线处点疏，
+  // 曲率流在非均匀点距上会不稳定。
+  function resampleContour(pts, closed, step) {
+    var w = pts.slice();
+    if (closed) w.push([pts[0][0], pts[0][1]]);
+    var n = w.length, acc = [0], i;
+    for (i = 1; i < n; i++)
+      acc.push(acc[i - 1] + Math.hypot(w[i][0] - w[i - 1][0], w[i][1] - w[i - 1][1]));
+    var total = acc[n - 1];
+    if (total < 1e-6) return pts;
+    var count = clamp(Math.round(total / step), 8, 20000), out = [], j = 0;
+    for (i = 0; i < count; i++) {
+      var t = total * i / count;
+      while (j < n - 2 && acc[j + 1] < t) j++;
+      var seg = acc[j + 1] - acc[j], u = seg > 1e-9 ? (t - acc[j]) / seg : 0;
+      out.push([w[j][0] + (w[j + 1][0] - w[j][0]) * u,
+        w[j][1] + (w[j + 1][1] - w[j][1]) * u]);
+    }
+    return out;
+  }
+
+  // ---------- B2. 曲率先验平滑（分段 Taubin λ|μ + 角点定桩） ----------
+  // 旧版把"转角>阈值"的点硬锁死：marching squares 的每个 90° 像素台阶都会被判成
+  // 角点，平滑整体失效，噪声被如实描成几百条毛刺曲线；拉普拉斯热扩散还会收缩圆弧。
+  // 现在用大跨度转角 + 非极大值抑制找出真正的形状角点，在角点处把轮廓"断开"并
+  // 定桩，各段内部独立做 Taubin 无收缩低通：噪声被压平，尖角完全不被磨圆。
   function smoothContour(pts, closed, passes, prior, cornerThresh) {
     var n = pts.length;
-    if (n < 5) return { pts: pts, corners: [] };
-    var orig = pts.map(function (p) { return [p[0], p[1]]; });
-    var corners = [];
-    // 转角检测：用前后各 2 点的弦，抑制单像素噪声
-    for (var i = 0; i < n; i++) {
-      if (!closed && (i < 2 || i > n - 3)) continue;
-      var im = (i - 2 + n) % n, ip = (i + 2) % n;
+    if (n < 10) return { pts: pts, corners: [] };
+    var span = clamp(Math.round(n / 90), 4, 10), i, k;
+    var ang = new Float64Array(n);
+    for (i = 0; i < n; i++) {
+      if (!closed && (i < span || i > n - 1 - span)) continue;
+      var im = (i - span + n) % n, ip = (i + span) % n;
       var v1x = pts[i][0] - pts[im][0], v1y = pts[i][1] - pts[im][1];
       var v2x = pts[ip][0] - pts[i][0], v2y = pts[ip][1] - pts[i][1];
       var l1 = Math.hypot(v1x, v1y), l2 = Math.hypot(v2x, v2y);
       if (l1 < 1e-6 || l2 < 1e-6) continue;
-      var cosv = clamp((v1x * v2x + v1y * v2y) / (l1 * l2), -1, 1);
-      if (Math.acos(cosv) > cornerThresh) corners.push(i);
+      ang[i] = Math.acos(clamp((v1x * v2x + v1y * v2y) / (l1 * l2), -1, 1));
     }
-    var lock = new Uint8Array(n);
-    for (var ci = 0; ci < corners.length; ci++) {
-      var c = corners[ci];
-      for (var o = -1; o <= 1; o++) {
-        var q = c + o;
+    var corners = [];
+    for (i = 0; i < n; i++) {
+      if (ang[i] < cornerThresh) continue;
+      var peak = true;
+      for (k = -span; k <= span; k++) {
+        if (!k) continue;
+        var q = i + k;
         if (closed) q = (q + n) % n;
-        if (q >= 0 && q < n) lock[q] = 1;
+        if (q < 0 || q >= n) continue;
+        if (ang[q] > ang[i] || (ang[q] === ang[i] && q < i)) { peak = false; break; }
       }
+      if (peak) corners.push(i);
     }
-    var data = 0.06;
-    for (var it = 0; it < passes; it++) {
-      var next = new Array(n);
-      for (var j = 0; j < n; j++) next[j] = [pts[j][0], pts[j][1]];
-      for (var j2 = 0; j2 < n; j2++) {
-        if (lock[j2]) continue;
-        if (!closed && (j2 === 0 || j2 === n - 1)) continue;
-        var jm = j2 === 0 ? (closed ? n - 1 : 0) : j2 - 1;
-        var jp = j2 === n - 1 ? (closed ? 0 : n - 1) : j2 + 1;
-        var ax = (pts[jm][0] + pts[jp][0]) / 2, ay = (pts[jm][1] + pts[jp][1]) / 2;
-        next[j2][0] += prior * (ax - pts[j2][0]) + data * (orig[j2][0] - pts[j2][0]);
-        next[j2][1] += prior * (ay - pts[j2][1]) + data * (orig[j2][1] - pts[j2][1]);
+    corners.sort(function (a, b) { return a - b; });
+    // 角点 = 段起点；段与段之间不互相平滑，角点自身定桩不动
+    var cutAt = new Uint8Array(n), fixed = new Uint8Array(n);
+    for (i = 0; i < corners.length; i++) { cutAt[corners[i]] = 1; fixed[corners[i]] = 1; }
+    var lam = clamp(prior, 0.15, 0.65), mu = -lam - 0.02;
+    var cur = pts.map(function (q2) { return [q2[0], q2[1]]; });
+    var dx = new Float64Array(n), dy = new Float64Array(n);
+    function pass(rate) {
+      var j, jm, jp, jpRaw;
+      for (j = 0; j < n; j++) {
+        dx[j] = 0; dy[j] = 0;
+        if (fixed[j]) continue;
+        if (!closed && (j === 0 || j === n - 1)) continue;
+        jm = cutAt[j] ? j : (closed ? (j - 1 + n) % n : j - 1);
+        jpRaw = closed ? (j + 1) % n : j + 1;
+        jp = cutAt[jpRaw] ? j : jpRaw;
+        dx[j] = rate * 0.5 * (cur[jm][0] + cur[jp][0] - 2 * cur[j][0]);
+        dy[j] = rate * 0.5 * (cur[jm][1] + cur[jp][1] - 2 * cur[j][1]);
       }
-      pts = next;
+      for (j = 0; j < n; j++) { cur[j][0] += dx[j]; cur[j][1] += dy[j]; }
     }
-    return { pts: pts, corners: corners };
+    for (var it = 0; it < passes; it++) { pass(lam); pass(mu); }
+    return { pts: cur, corners: corners };
   }
 
   // ---------- C. 自适应三次贝塞尔拟合 ----------
@@ -353,6 +425,7 @@
     var tol = opts.bezierTol || 0.55;
     var minArea = opts.minArea || 4;
 
+
     var lut = buildColorLUT(palette);
     var labels = new Uint8Array(N), others = new Uint8Array(N), mixes = new Float32Array(N);
     var counts = new Int32Array(K);
@@ -375,6 +448,12 @@
       }
     }
     mergeTinyRegions(labels, others, mixes, W, H, minArea);
+    var noise = estimateNoise(labels, W, H);
+    // 角点已定桩、分段平滑不会跨角，因此加大低通不会磨圆尖角，只影响边界的亚像素位置。
+    // 干净输入保持 0 次以保精度与锐度；带噪输入按破碎度升到 3-6 次，把撕裂/振铃压成连续边界。
+    var blurIters = opts.blurIters == null
+      ? (noise >= 0.12 ? 6 : noise >= 0.05 ? 5 : noise >= 0.025 ? 3 : noise >= 0.015 ? 1 : 0)
+      : opts.blurIters;
 
     // 覆盖率只在"物理相邻的两种颜色"之间反解：用 8 邻域里真实出现的主导色
     // 替换全局次近色。否则黑白边缘的灰会被投影成"黑+橙"，凭空画出杂色细边。
@@ -423,6 +502,7 @@
         if (v < 0.5) full = false;
       }
       if (!any || full) continue;
+      blurField(field, W, H, blurIters);
       var segs = marchingSquares(field, W, H);
       if (!segs.length) continue;
       var contours = linkContours(segs, 6);
@@ -432,8 +512,7 @@
         var closed = keyOf(chain[0]) === keyOf(chain[chain.length - 1]);
         if (closed) chain = chain.slice(0, -1);
         if (chain.length < 4) continue;
-        // 平滑必须在密集的原始轮廓点上做；先简化会让拉普拉斯步长相对点距过大，形状被拉歪。
-        // 节点压缩交给后面的三次贝塞尔拟合（bezierTol）完成。
+        chain = resampleContour(chain, closed, 1.0);
         var sm = smoothContour(chain, closed, passes, prior, cornerThresh);
         var piece = contourToPath(sm.pts, closed, tol, sm.corners);
         if (piece) d += (d ? ' ' : '') + piece;
@@ -448,8 +527,8 @@
     var bgRect = '<path fill="' + hex(palette[bg]) + '" d="M0 0H' + W + 'V' + H + 'H0Z"/>';
     var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H +
       '" viewBox="0 0 ' + W + ' ' + H + '">' + bgRect + parts.join('') + '</svg>';
-    return { svg: svg, paths: totalPaths + 1, colors: K };
+    return { svg: svg, paths: totalPaths + 1, colors: K, noise: noise, blurIters: blurIters };
   }
 
-  global.VMTracer = { trace: trace, version: '1.0.0' };
+  global.VMTracer = { trace: trace, version: '1.2.0' };
 })(typeof window !== 'undefined' ? window : globalThis);

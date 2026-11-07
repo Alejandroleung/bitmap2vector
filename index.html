@@ -1316,12 +1316,14 @@ async function doConvert(){
       const pal=(qinfo&&qinfo.palette&&qinfo.palette.length>=2)
         ?qinfo.palette:paletteFromData(origRGB,opts.numberofcolors);
       if(pal.length<2) throw new Error("颜色数量不足，无法描摹");
-      // 线条拟合四档 → 先验强度 / 角点阈值 / 贝塞尔误差容限
-      // （对应 ContourSmoother::prior_strengths、puncture_corner_thresh、BezierFitter::stat_thresh_final）
+      // 线条拟合四档 → 分段 Taubin 平滑强度 / 角点定桩阈值 / 贝塞尔误差容限。
+      // 不传 blurIters：引擎会按离散标签图的边界破碎度自动选低通强度
+      // （干净图 0 次保住尖角与精度；JPEG / 超分伪影 2-3 次压平毛刺）。
+      // cornerThresh 越大 = 越少角点被定桩 = 越平滑。
       const vmOpts={
-        smoothPasses:[10,18,26,34][lt]||18,
-        prior:[0.28,0.38,0.48,0.58][lt]||0.38,
-        cornerThresh:[1.15,1.0,0.88,0.78][lt]||1.0,
+        smoothPasses:[18,24,32,44][lt]||24,
+        prior:[0.30,0.40,0.50,0.60][lt]||0.40,
+        cornerThresh:[0.90,1.0,1.1,1.2][lt]||1.0,
         bezierTol:[0.35,0.55,0.85,1.3][lt]||0.55,
         minArea:Math.max(2,(+$("minArea").value||1)*4),
         labelData:imgData,   // 量化器已处理过的离散分割结果（含过渡色吸收）
@@ -1330,7 +1332,7 @@ async function doConvert(){
       const res=window.VMTracer.trace(new ImageData(origRGB,imgData.width,imgData.height),pal,vmOpts);
       svg=res.svg;
       el=((performance.now()-t0)/1000).toFixed(1);
-      engineNote=` · VM 引擎 ${res.paths} 图形/${res.colors} 色`;
+      engineNote=` · VM 引擎 ${res.paths} 图形/${res.colors} 色${res.blurIters?` · 自适应降噪 ${res.blurIters} 级`:""}`;
     }else{
       const st=performance.now();
       svg=ImageTracer.imagedataToSVG(imgData,opts);
