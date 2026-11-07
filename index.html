@@ -1316,16 +1316,18 @@ async function doConvert(){
       const pal=(qinfo&&qinfo.palette&&qinfo.palette.length>=2)
         ?qinfo.palette:paletteFromData(origRGB,opts.numberofcolors);
       if(pal.length<2) throw new Error("颜色数量不足，无法描摹");
-      // 线条拟合四档 → 分段 Taubin 平滑强度 / 角点定桩阈值 / 贝塞尔误差容限。
-      // 不传 blurIters：引擎会按离散标签图的边界破碎度自动选低通强度
-      // （干净图 0 次保住尖角与精度；JPEG / 超分伪影 2-3 次压平毛刺）。
-      // cornerThresh 越大 = 越少角点被定桩 = 越平滑。
+      // 依据 Vector Magic 官方 Samples 的 4 张 SVG 逐像素标定：贴合优先，
+      // 关闭无数据项的 Taubin 平滑与 trapping 描边（两者实测都会推离官方边界）。
+      // 四档语义：越靠前越贴官方输出（节点更多），越靠后越省节点/更平滑。
+      // 不传 blurIters：引擎按边界破碎度自适应，上限 2 级（原 6 级是负贡献）。
       const vmOpts={
-        smoothPasses:[18,24,32,44][lt]||24,
-        prior:[0.30,0.40,0.50,0.60][lt]||0.40,
-        cornerThresh:[0.90,1.0,1.1,1.2][lt]||1.0,
-        bezierTol:[0.35,0.55,0.85,1.3][lt]||0.55,
-        minArea:Math.max(2,(+$("minArea").value||1)*4),
+        smoothPasses:[0,0,8,20][lt]||0,
+        prior:[0.60,0.60,0.50,0.40][lt]||0.60,
+        cornerThresh:[1.30,1.30,1.10,1.00][lt]||1.30,
+        bezierTol:[0.06,0.10,0.30,0.85][lt]||0.10,
+        minArea:Math.max(2,(+$("minArea").value||1)*8),
+        level:0.5,           // 真实边界落在覆盖率 0.5 处，标定确认最优
+        trapStroke:0,        // 0.5px 描边会让每层边界膨胀，实测增大差异
         labelData:imgData,   // 量化器已处理过的离散分割结果（含过渡色吸收）
       };
       const t0=performance.now();
