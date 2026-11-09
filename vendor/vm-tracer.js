@@ -548,18 +548,25 @@
       }
       work.push([work[0][0], work[0][1]]);
       cuts = [0].concat(corners.filter(function (c) { return c > 2 && c < n - 2; }), [work.length - 1]);
-      if (cuts.length === 2) cuts.splice(1, 0, Math.floor(n / 2));   // 无角点也至少切两段
+      if (cuts.length === 2) cuts.splice(1, 0, Math.floor(n / 2));   // 无角点也切两段，避免整段拟合不稳定
     } else {
       cuts = [0].concat(corners.filter(function (c) { return c > 2 && c < n - 2; }), [n - 1]);
     }
     cuts = cuts.filter(function (v, i, arr) { return i === 0 || v - arr[i - 1] >= 3; });
     if (cuts[cuts.length - 1] !== (closed ? work.length - 1 : n - 1)) cuts.push(closed ? work.length - 1 : n - 1);
-    var out = ['M' + fmt(work[0][0]) + ' ' + fmt(work[0][1])];
+    // 先对每个切段单独拟合（不做段内 merge），收集所有段
+    var allSegs = [];
     for (var s = 0; s < cuts.length - 1; s++) {
       var seg = work.slice(cuts[s], cuts[s + 1] + 1);
       if (seg.length < 2) continue;
-      fitSegment(seg, tol, out, 0);
+      var segs = fitSegStruct(seg, tol, 0);
+      for (var si = 0; si < segs.length; si++) allSegs.push(segs[si]);
     }
+    // 全局跨段 merge：让圆弧基元能跨越角点切分段
+    allSegs = mergeSegments(allSegs, tol);
+    // 输出
+    var out = ['M' + fmt(work[0][0]) + ' ' + fmt(work[0][1])];
+    for (var oi = 0; oi < allSegs.length; oi++) out.push(allSegs[oi].cmd);
     if (closed) out.push('Z');
     return out.join(' ');
   }
