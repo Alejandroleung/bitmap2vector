@@ -354,72 +354,183 @@
     return cur;
   }
 
-  // ---------- C. 自适应三次贝塞尔拟合 ----------
+  // ---------- C. 自适应三次贝塞尔拟合 + 圆弧基元 + 段合并 ----------
   function unit(v) {
     var l = Math.hypot(v[0], v[1]);
     return l < 1e-9 ? [1, 0] : [v[0] / l, v[1] / l];
   }
 
-  function fitSegment(P, tol, out, depth) {
+  // 直线检测：所有点到首尾连线的距离 < tol
+  function tryLine(P, tol) {
+    if (P.length < 3) return true;
+    var p0 = P[0], pN = P[P.length - 1];
+    var dx = pN[0] - p0[0], dy = pN[1] - p0[1];
+    var len = Math.hypot(dx, dy);
+    if (len < 1e-9) return false;
+    var nx = -dy / len, ny = dx / len;
+    for (var i = 1; i < P.length - 1; i++) {
+      var dist = Math.abs((P[i][0] - p0[0]) * nx + (P[i][1] - p0[1]) * ny);
+      if (dist > tol) return false;
+    }
+    return true;
+  }
+
+  // 圆弧最小二乘拟合（Kåsa 代数法）
+  function fitArc(P) {
     var n = P.length;
-    if (n < 3) { if (n === 2) out.push('L' + fmt(P[1][0]) + ' ' + fmt(P[1][1])); return; }
+    if (n < 5) return null;
+    var sxx=0,syy=0,sxy=0,sx=0,sy=0,sxxx=0,syyy=0,sxxy=0,sxyy=0,szz=0;
+    for (var i=0;i<n;i++){var x=P[i][0],y=P[i][1];var z=x*x+y*y;
+      sxx+=x*x;syy+=y*y;sxy+=x*y;sx+=x;sy+=y;szz+=z;
+      sxxx+=x*z;syyy+=y*z;sxxy+=x*x*y;sxyy+=x*y*y;}
+    // Kåsa: [sxx sxy sx] [A]   [sxxx+sxyy]
+    //       [sxy syy sy] [B] = [sxxy+syyy]
+    //       [sx  sy  n ] [C]   [szz      ]
+    var r1=sxxx+sxyy, r2=sxxy+syyy, r3=szz;
+    var M=[[sxx,sxy,sx],[sxy,syy,sy],[sx,sy,n]];
+    var det=M[0][0]*(M[1][1]*M[2][2]-M[1][2]*M[2][1])
+           -M[0][1]*(M[1][0]*M[2][2]-M[1][2]*M[2][0])
+           +M[0][2]*(M[1][0]*M[2][1]-M[1][1]*M[2][0]);
+    if(Math.abs(det)<1e-9)return null;
+    var A=(r1*(M[1][1]*M[2][2]-M[1][2]*M[2][1])
+          -M[0][1]*(r2*M[2][2]-M[1][2]*r3)
+          +M[0][2]*(r2*M[2][1]-M[1][1]*r3))/det;
+    var B=(M[0][0]*(r2*M[2][2]-M[1][2]*r3)
+          -r1*(M[1][0]*M[2][2]-M[1][2]*M[2][0])
+          +M[0][2]*(M[1][0]*r3-r2*M[2][0]))/det;
+    var C=(M[0][0]*(M[1][1]*r3-r2*M[2][1])
+          -M[0][1]*(M[1][0]*r3-r2*M[2][0])
+          +r1*(M[1][0]*M[2][1]-M[1][1]*M[2][0]))/det;
+    var cx=A/2, cy=B/2;
+    var r=Math.sqrt(C+cx*cx+cy*cy);
+    if(r<1||r>10000)return null;
+    var maxErr=0;
+    for(var i2=0;i2<n;i2++){
+      var d=Math.abs(Math.hypot(P[i2][0]-cx,P[i2][1]-cy)-r);
+      if(d>maxErr)maxErr=d;
+    }
+    var p0=P[0],pN=P[n-1];
+    var th1=Math.atan2(p0[1]-cy,p0[0]-cx);
+    var th2=Math.atan2(pN[1]-cy,pN[0]-cx);
+    var mid=P[n>>1];
+    var thMid=Math.atan2(mid[1]-cy,mid[0]-cx);
+    function norm(a){while(a>Math.PI)a-=2*Math.PI;while(a<-Math.PI)a+=2*Math.PI;return a;}
+    var ccw=norm(thMid-th1)>0;
+    if(ccw&&th2<=th1)th2+=2*Math.PI;
+    if(!ccw&&th2>=th1)th2-=2*Math.PI;
+    if(Math.abs(th2-th1)>Math.PI*1.5)return null;
+    return{cx:cx,cy:cy,r:r,theta1:th1,theta2:th2,ccw:ccw,err:maxErr};
+  }
+
+  function arcToBezierCmd(p0,p3,arc){
+    var k=4/3*Math.tan(Math.abs(arc.theta2-arc.theta1)/4);
+    var r=arc.r,th1=arc.theta1,th2=arc.theta2;
+    var c1x,c1y,c2x,c2y;
+    if(arc.ccw){
+      c1x=p0[0]+k*r*(-Math.sin(th1));
+      c1y=p0[1]+k*r*(Math.cos(th1));
+      c2x=p3[0]-k*r*(-Math.sin(th2));
+      c2y=p3[1]-k*r*(Math.cos(th2));
+    }else{
+      c1x=p0[0]+k*r*(Math.sin(th1));
+      c1y=p0[1]+k*r*(-Math.cos(th1));
+      c2x=p3[0]-k*r*(Math.sin(th2));
+      c2y=p3[1]-k*r*(-Math.cos(th2));
+    }
+    return 'C'+fmt(c1x)+' '+fmt(c1y)+' '+fmt(c2x)+' '+fmt(c2y)+' '+fmt(p3[0])+' '+fmt(p3[1]);
+  }
+
+  // 结构化拟合：返回段列表 [{points, cmd, type}]
+  function fitSegStruct(P, tol, depth) {
+    var n = P.length;
     depth = depth || 0;
+    if (n < 2) return [];
+    if (n === 2) return [{ points: P, cmd: 'L' + fmt(P[1][0]) + ' ' + fmt(P[1][1]), type: 'L' }];
+    // 1. 直线优先
+    if (tryLine(P, tol * 1.5)) {
+      return [{ points: P, cmd: 'L' + fmt(P[n-1][0]) + ' ' + fmt(P[n-1][1]), type: 'L' }];
+    }
+    // 2. 圆弧基元（点数够时）
+    if (n >= 6) {
+      var arc = fitArc(P);
+      if (arc && arc.err < tol * 1.2) {
+        return [{ points: P, cmd: arcToBezierCmd(P[0], P[n-1], arc), type: 'A' }];
+      }
+    }
+    // 3. 三次贝塞尔
     var p0 = P[0], p3 = P[n - 1];
     var chord = Math.hypot(p3[0] - p0[0], p3[1] - p0[1]);
     var T0 = unit([P[Math.min(4, n - 1)][0] - p0[0], P[Math.min(4, n - 1)][1] - p0[1]]);
     var T3 = unit([p3[0] - P[Math.max(0, n - 5)][0], p3[1] - P[Math.max(0, n - 5)][1]]);
-    // 按弧长参数化
     var ts = new Float64Array(n), total = 0;
     ts[0] = 0;
-    for (var i = 1; i < n; i++) {
-      total += Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1]);
-      ts[i] = total;
-    }
+    for (var i = 1; i < n; i++) { total += Math.hypot(P[i][0] - P[i-1][0], P[i][1] - P[i-1][1]); ts[i] = total; }
     if (total < 1e-9) { for (var q = 1; q < n; q++) ts[q] = q / (n - 1); }
     else for (var q2 = 1; q2 < n; q2++) ts[q2] /= total;
-
-    var sUU = 0, sVV = 0, sUV = 0, sRU = 0, sRV = 0;
-    var dotTA = T0[0] * T3[0] + T0[1] * T3[1];
-    var A = [], D = [], Rx = [], Ry = [];
+    var sUU=0,sVV=0,sUV=0,sRU=0,sRV=0;
+    var dotTA = T0[0]*T3[0] + T0[1]*T3[1];
     for (var i2 = 0; i2 < n; i2++) {
       var t = ts[i2], it = 1 - t;
-      var a = 3 * it * it * t, d = 3 * it * t * t;
-      // 代入 C1=P0+alpha*T0、C2=P3-beta*T3 后，P0 系数 = (1-t)^3+a，P3 系数 = d+t^3
-      var bx = (it * it * it + a) * p0[0] + (d + t * t * t) * p3[0];
-      var by = (it * it * it + a) * p0[1] + (d + t * t * t) * p3[1];
-      A.push(a); D.push(d);
-      var rx = P[i2][0] - bx, ry = P[i2][1] - by;
-      Rx.push(rx); Ry.push(ry);
-      sUU += a * a; sVV += d * d; sUV += -a * d * dotTA;
-      sRU += a * (rx * T0[0] + ry * T0[1]);
-      sRV += -d * (rx * T3[0] + ry * T3[1]);
+      var a = 3*it*it*t, d = 3*it*t*t;
+      var bx = (it*it*it+a)*p0[0] + (d+t*t*t)*p3[0];
+      var by = (it*it*it+a)*p0[1] + (d+t*t*t)*p3[1];
+      var rx = P[i2][0]-bx, ry = P[i2][1]-by;
+      sUU += a*a; sVV += d*d; sUV += -a*d*dotTA;
+      sRU += a*(rx*T0[0]+ry*T0[1]);
+      sRV += -d*(rx*T3[0]+ry*T3[1]);
     }
-    var det = sUU * sVV - sUV * sUV;
-    var alpha = 0, beta = 0;
+    var det = sUU*sVV - sUV*sUV;
+    var alpha=0, beta=0;
     if (Math.abs(det) > 1e-12) {
-      alpha = (sRU * sVV - sRV * sUV) / det;
-      beta = (sRV * sUU - sRU * sUV) / det;
+      alpha = (sRU*sVV - sRV*sUV) / det;
+      beta = (sRV*sUU - sRU*sUV) / det;
     }
-    var cap = Math.max(1, chord * 1.2);
+    var cap = Math.max(1, chord*1.2);
     alpha = clamp(alpha, 0, cap); beta = clamp(beta, 0, cap);
-    var c1 = [p0[0] + alpha * T0[0], p0[1] + alpha * T0[1]];
-    var c2 = [p3[0] - beta * T3[0], p3[1] - beta * T3[1]];
-
-    // 最大拟合误差
-    var maxErr = 0, maxIdx = -1;
+    var c1 = [p0[0]+alpha*T0[0], p0[1]+alpha*T0[1]];
+    var c2 = [p3[0]-beta*T3[0], p3[1]-beta*T3[1]];
+    var maxErr=0, maxIdx=-1;
     for (var i3 = 0; i3 < n; i3++) {
-      var tt = ts[i3], u = 1 - tt;
-      var ex = u * u * u * p0[0] + 3 * u * u * tt * c1[0] + 3 * u * tt * tt * c2[0] + tt * tt * tt * p3[0] - P[i3][0];
-      var ey = u * u * u * p0[1] + 3 * u * u * tt * c1[1] + 3 * u * tt * tt * c2[1] + tt * tt * tt * p3[1] - P[i3][1];
-      var e = ex * ex + ey * ey;
+      var tt=ts[i3], u=1-tt;
+      var ex = u*u*u*p0[0]+3*u*u*tt*c1[0]+3*u*tt*tt*c2[0]+tt*tt*tt*p3[0]-P[i3][0];
+      var ey = u*u*u*p0[1]+3*u*u*tt*c1[1]+3*u*tt*tt*c2[1]+tt*tt*tt*p3[1]-P[i3][1];
+      var e = ex*ex+ey*ey;
       if (e > maxErr) { maxErr = e; maxIdx = i3; }
     }
-    if (Math.sqrt(maxErr) > tol && n >= 8 && depth < 12 && maxIdx > 1 && maxIdx < n - 2) {
-      fitSegment(P.slice(0, maxIdx + 1), tol, out, depth + 1);
-      fitSegment(P.slice(maxIdx), tol, out, depth + 1);
-      return;
+    if (Math.sqrt(maxErr) > tol && n >= 8 && depth < 12 && maxIdx > 1 && maxIdx < n-2) {
+      return fitSegStruct(P.slice(0, maxIdx+1), tol, depth+1)
+        .concat(fitSegStruct(P.slice(maxIdx), tol, depth+1));
     }
-    out.push('C' + fmt(c1[0]) + ' ' + fmt(c1[1]) + ' ' + fmt(c2[0]) + ' ' + fmt(c2[1]) + ' ' + fmt(p3[0]) + ' ' + fmt(p3[1]));
+    return [{ points: P, cmd: 'C'+fmt(c1[0])+' '+fmt(c1[1])+' '+fmt(c2[0])+' '+fmt(c2[1])+' '+fmt(p3[0])+' '+fmt(p3[1]), type: 'C' }];
+  }
+
+  // 相邻段合并：两段合成一段重拟合，残差达标就接受
+  function mergeSegments(segs, tol) {
+    if (segs.length <= 1) return segs;
+    var changed = true;
+    var mergeTol = tol * 1.6;
+    while (changed && segs.length > 1) {
+      changed = false;
+      for (var i = 0; i < segs.length - 1; i++) {
+        var a = segs[i], b = segs[i+1];
+        if (a.type === 'L' || b.type === 'L') continue;
+        var merged = a.points.concat(b.points.slice(1));
+        if (merged.length > 2000) continue;
+        var refit = fitSegStruct(merged, mergeTol, 0);
+        if (refit.length === 1 && refit[0].type !== 'L') {
+          segs.splice(i, 2, refit[0]);
+          changed = true;
+        }
+      }
+    }
+    return segs;
+  }
+
+  // 兼容旧接口
+  function fitSegment(P, tol, out, depth) {
+    var segs = fitSegStruct(P, tol, depth);
+    segs = mergeSegments(segs, tol);
+    for (var i = 0; i < segs.length; i++) out.push(segs[i].cmd);
   }
 
   // 把一条轮廓按角点切段后拟合，输出 SVG 路径命令
@@ -608,5 +719,5 @@
     return { svg: svg, paths: totalPaths + 1, colors: K, noise: noise, blurIters: blurIters };
   }
 
-  global.VMTracer = { trace: trace, version: '1.4.0' };
+  global.VMTracer = { trace: trace, version: '1.5.0' };
 })(typeof window !== 'undefined' ? window : globalThis);
