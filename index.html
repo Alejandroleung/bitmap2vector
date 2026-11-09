@@ -995,8 +995,9 @@ function quantizeToColors(imgData, n){
     cnt[bi]++; sr[bi]+=d[i]; sg[bi]+=d[i+1]; sb[bi]+=d[i+2];
   }
   const idxs=[];
-  for(let b=0;b<BINS;b++) if(cnt[b]) idxs.push(b);
-  if(idxs.length<=n) return {count:idxs.length, palette:null, merged:0};
+  let uniqueBins=0;
+  for(let b=0;b<BINS;b++) if(cnt[b]){idxs.push(b);uniqueBins++;}
+  if(idxs.length<=n) return {count:idxs.length, palette:null, merged:0, uniqueBins};
 
   idxs.sort((a,b)=>cnt[b]-cnt[a]);
   // 面积最大的 N 个色箱作为初始质心
@@ -1019,7 +1020,10 @@ function quantizeToColors(imgData, n){
     for(let k=0;k<n;k++) if(aW[k]>0) cents[k]=[aR[k]/aW[k], aG[k]/aW[k], aB[k]/aW[k]];
     weights=aW;
   }
-  // 合并过于接近的质心：放大/AI 处理会带来细微色差，避免同一色块被拆成两种几乎相同的颜色
+  // 近色合并（两阶段）：
+  // 第一阶段：保守阈值 16，合并几乎相同的质心（放大/AI 处理的细微色差）。
+  // 第二阶段：如果第一阶段后 ≤6 色（少色图，如 Logo/旗帜），再用激进阈值 50 合并 JPEG 压缩噪声变种。
+  // 多色图（>6 色）只做保守合并，不破坏真实色差。
   if(weights){
     let mergedOnce=true;
     while(mergedOnce){
@@ -1036,6 +1040,33 @@ function quantizeToColors(imgData, n){
                       (cents[a][2]*wa+cents[b][2]*wb)/tw];
             weights[a]=tw; weights[b]=0;
             mergedOnce=true; break;
+          }
+        }
+      }
+    }
+  }
+  // 第二阶段激进合并：少色图（≤6 色簇）用阈值 50 合并 JPEG 压缩噪声变种。
+  // 多色图（>6 色簇）跳过——不同色系距离可能 <50 但不能合并。
+  {
+    let activeCount=0;
+    for(let k=0;k<n;k++) if(weights && weights[k]>0) activeCount++;
+    if(activeCount<=6 && activeCount>2){
+      let mergedOnce=true;
+      while(mergedOnce){
+        mergedOnce=false;
+        for(let a=0;a<n && !mergedOnce;a++){
+          if(!weights || !weights[a]) continue;
+          for(let b=a+1;b<n;b++){
+            if(!weights[b]) continue;
+            const d0=cents[a][0]-cents[b][0], d1=cents[a][1]-cents[b][1], d2=cents[a][2]-cents[b][2];
+            if(Math.sqrt(d0*d0+d1*d1+d2*d2)<50){
+              const wa=weights[a], wb=weights[b], tw=wa+wb;
+              cents[a]=[(cents[a][0]*wa+cents[b][0]*wb)/tw,
+                        (cents[a][1]*wa+cents[b][1]*wb)/tw,
+                        (cents[a][2]*wa+cents[b][2]*wb)/tw];
+              weights[a]=tw; weights[b]=0;
+              mergedOnce=true; break;
+            }
           }
         }
       }
@@ -1071,25 +1102,29 @@ function quantizeToColors(imgData, n){
       }
     }
   }
-  // JPEG/扫描压缩噪声色并入：当图本身颜色少（前 3 大色占 >85% 面积）时，
-  // 其余小面积色层几乎都是压缩伪影（暗红/暗黄/灰边等），不是设计意图。
-  // 把面积 < 阈值 的小色层全部并入最近的大主色，消除"黑边/暗边"。
-  // 前提：不破坏多色图——前 3 大色占 <85% 时不触发。
-  if(keep.length>3 && weights){
-    const sortedByArea=keep.slice().sort((a,b)=>weights[b]-weights[a]);
-    const top3Share=(weights[sortedByArea[0]]+weights[sortedByArea[1]]+weights[sortedByArea[2]])/total;
-    if(top3Share>=0.85){
-      // 大主色 = 面积占比 >=1% 的色层（不是硬性取前3，避免把噪声第3名也保护住）
-      const bigSet=new Set(keep.filter(k=>weights[k]/total>=0.01));
+  // JPEG/扫描压缩噪声色并入：只在少色图（合并后 ≤4 色）时触发。
+  // 存在 ≥2 个面积 >5% 的大主色时，面积 <2% 的小色层并入最近大主色。
+  // 多色图（>4 色）不触发——小面积色可能是设计的一部分。
+  // 不依赖 top3 share（JPEG 把红色打散成几百种色会让 top3<50% 但图本身只有 2-3 色）。
+  if(keep.length>3 && keep.length<=4 && weights){
+    const bigColors=keep.filter(k=>weights[k]/total>=0.05);
+    if(bigColors.length>=2){
       let changed=true;
-      while(changed && keep.length>bigSet.size){
+      while(changed && keep.length>2){
         changed=false;
         keep.sort((a,b)=>weights[a]-weights[b]);
         for(let i=0;i<keep.length && !changed;i++){
           const s=keep[i];
-          if(bigSet.has(s)) continue;               // 大主色保留
-          if(weights[s]/total>=0.02) continue;       // 面积>2% 保留（可能是真需要的色）
-          keep.splice(i,1); changed=true;
+          if(weights[s]/total>=0.02) continue;       // 面积>2% 保留
+          if(bigColors.indexOf(s)>=0) continue;       // 大主色保留
+          // 找最近的大色并入
+          let bestBig=-1, bestDist=Infinity;
+          for(const k of bigColors){
+            const dr=cents[s][0]-cents[k][0], dg=cents[s][1]-cents[k][1], db=cents[s][2]-cents[k][2];
+            const dist=Math.sqrt(dr*dr+dg*dg+db*db);
+            if(dist<bestDist){bestDist=dist;bestBig=k;}
+          }
+          if(bestBig>=0){keep.splice(i,1);changed=true;}
         }
       }
     }
