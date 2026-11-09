@@ -583,7 +583,7 @@
     var passes = opts.smoothPasses == null ? 0 : opts.smoothPasses;
     var prior = opts.prior == null ? 0.60 : opts.prior;
     var cornerThresh = opts.cornerThresh == null ? 1.30 : opts.cornerThresh;
-    var tol = opts.bezierTol == null ? 0.10 : opts.bezierTol;
+    var tol = opts.bezierTol == null ? 0.08 : opts.bezierTol;
     var minArea = opts.minArea == null ? 8 : opts.minArea;
     // 等值线阈值 = "真实边界落在覆盖率 p 处"的物理假设。0.5 是中性值，
     // 但光栅化的 gamma / 抗锯齿核会让最优 p 略偏；可用官方输出标定。
@@ -618,7 +618,7 @@
     // 角点已定桩、分段平滑不会跨角，因此加大低通不会磨圆尖角，只影响边界的亚像素位置。
     // 干净输入保持 0 次以保精度与锐度；带噪输入按破碎度升到 3-6 次，把撕裂/振铃压成连续边界。
     var blurIters = opts.blurIters == null
-      ? (noise >= 0.12 ? 2 : 1)
+      ? (noise >= 0.12 ? 3 : 2)
       : opts.blurIters;
 
     // 覆盖率只在"物理相邻的两种颜色"之间反解：用 8 邻域里真实出现的主导色
@@ -719,5 +719,5 @@
     return { svg: svg, paths: totalPaths + 1, colors: K, noise: noise, blurIters: blurIters };
   }
 
-  global.VMTracer = { trace: trace, version: '1.5.0' };
+  global.VMTracer = { trace: trace, version: '1.5.1' };
 })(typeof window !== 'undefined' ? window : globalThis);
