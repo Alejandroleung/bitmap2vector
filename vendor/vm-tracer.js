@@ -508,7 +508,7 @@
   function mergeSegments(segs, tol) {
     if (segs.length <= 1) return segs;
     var changed = true;
-    var mergeTol = tol * 1.6;
+    var mergeTol = tol * 1.8;
     while (changed && segs.length > 1) {
       changed = false;
       for (var i = 0; i < segs.length - 1; i++) {
