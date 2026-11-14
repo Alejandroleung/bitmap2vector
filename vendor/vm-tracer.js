@@ -626,6 +626,117 @@
   }
 
   // 把一条轮廓按角点切段后拟合，输出 SVG 路径命令
+  // ---------- C2. Vector Magic 式拟合：固定端点 + 正规方程最小二乘 ----------
+  // 依据 vmde.exe 反编译（docs/vm-algorithm-findings.md）：
+  //   端点由分割阶段给定，只解两个中间控制点；每个坐标一条方程，共 2N 行；
+  //   正规方程 M = AᵀA 加 1e-5 岭项后，用 LU（LAPACK dgesv）求解。
+  // 这里用带部分主元的高斯消元复现 dgesv 的结果（4×4 系统下两者一致）。
+  function solveLU4(M, v) {
+    var n = v.length, A = [], i, j, k;
+    for (i = 0; i < n; i++) { A.push(M[i].slice()); }
+    var b = v.slice();
+    for (i = 0; i < n; i++) {
+      var piv = i;
+      for (k = i + 1; k < n; k++) if (Math.abs(A[k][i]) > Math.abs(A[piv][i])) piv = k;
+      if (A[piv][i] === 0) return null;                 // 奇异
+      if (piv !== i) { var t1 = A[i]; A[i] = A[piv]; A[piv] = t1; var t2 = b[i]; b[i] = b[piv]; b[piv] = t2; }
+      for (k = i + 1; k < n; k++) {
+        var f = A[k][i] / A[i][i];
+        if (!f) continue;
+        for (j = i; j < n; j++) A[k][j] -= f * A[i][j];
+        b[k] -= f * b[i];
+      }
+    }
+    var x = new Array(n);
+    for (i = n - 1; i >= 0; i--) {
+      var sum = b[i];
+      for (j = i + 1; j < n; j++) sum -= A[i][j] * x[j];
+      x[i] = sum / A[i][i];
+    }
+    return x;
+  }
+
+  // 对一段点（含首尾端点）做一次三次贝塞尔最小二乘，返回 {c1,c2,dev}
+  function fitCubicLS(seg) {
+    var n = seg.length;
+    if (n < 2) return null;
+    var P0 = seg[0], P3 = seg[n - 1];
+    // 弦长参数化（首尾为 0 / 1）
+    var acc = [0];
+    for (var i = 1; i < n; i++) {
+      acc.push(acc[i - 1] + Math.hypot(seg[i][0] - seg[i - 1][0], seg[i][1] - seg[i - 1][1]));
+    }
+    var total = acc[n - 1];
+    if (!(total > 1e-9)) return null;
+    var M = [[0, 0], [0, 0]], vx = [0, 0], vy = [0, 0];
+    for (var k = 0; k < n; k++) {
+      var t = acc[k] / total, u = 1 - t;
+      var b0 = u * u * u, b1 = 3 * u * u * t, b2 = 3 * u * t * t, b3 = t * t * t;
+      var rx = seg[k][0] - (b0 * P0[0] + b3 * P3[0]);
+      var ry = seg[k][1] - (b0 * P0[1] + b3 * P3[1]);
+      M[0][0] += b1 * b1; M[0][1] += b1 * b2;
+      M[1][1] += b2 * b2;
+      vx[0] += b1 * rx; vx[1] += b2 * rx;
+      vy[0] += b1 * ry; vy[1] += b2 * ry;
+    }
+    M[1][0] = M[0][1];
+    M[0][0] += 1e-5; M[1][1] += 1e-5;                   // 与 VM 相同的岭项
+    var sx = solveLU4(M, vx), sy = solveLU4(M, vy);
+    if (!sx || !sy) return null;
+    var c1 = [sx[0], sy[0]], c2 = [sx[1], sy[1]];
+    // 最大偏差（用于决定是否分裂）
+    var dev = 0, at = 0;
+    for (var q = 0; q < n; q++) {
+      var tt = acc[q] / total, uu = 1 - tt;
+      var w0 = uu * uu * uu, w1 = 3 * uu * uu * tt, w2 = 3 * uu * tt * tt, w3 = tt * tt * tt;
+      var px = w0 * P0[0] + w1 * c1[0] + w2 * c2[0] + w3 * P3[0];
+      var py = w0 * P0[1] + w1 * c1[1] + w2 * c2[1] + w3 * P3[1];
+      var dd = Math.hypot(px - seg[q][0], py - seg[q][1]);
+      if (dd > dev) { dev = dd; at = q; }
+    }
+    return { c1: c1, c2: c2, dev: dev, at: at };
+  }
+
+  // 递归：残差超阈值就在最大偏差处劈开
+  function fitSpanLS(seg, tol, depth, out) {
+    var r = fitCubicLS(seg);
+    if (!r) return;
+    if (r.dev <= tol || depth >= 6 || seg.length < 6 || r.at < 2 || r.at > seg.length - 3) {
+      out.push('C' + fmt(r.c1[0]) + ' ' + fmt(r.c1[1]) + ' ' + fmt(r.c2[0]) + ' ' + fmt(r.c2[1]) +
+               ' ' + fmt(seg[seg.length - 1][0]) + ' ' + fmt(seg[seg.length - 1][1]));
+      return;
+    }
+    fitSpanLS(seg.slice(0, r.at + 1), tol, depth + 1, out);
+    fitSpanLS(seg.slice(r.at), tol, depth + 1, out);
+  }
+
+  function contourToPathLS(pts, closed, tol, corners) {
+    if (pts.length < 3) return '';
+    var n = pts.length, work = pts.slice(), cuts;
+    if (closed) {
+      if (corners.length) {
+        var rot = corners[0];
+        work = work.slice(rot).concat(work.slice(0, rot));
+        corners = corners.map(function (c) { return (c - rot + n) % n; }).sort(function (a, b) { return a - b; });
+      }
+      work.push([work[0][0], work[0][1]]);
+      cuts = [0].concat(corners.filter(function (c) { return c > 2 && c < n - 2; }), [work.length - 1]);
+      if (cuts.length === 2) cuts.splice(1, 0, Math.floor(n / 2));
+    } else {
+      cuts = [0].concat(corners.filter(function (c) { return c > 2 && c < n - 2; }), [n - 1]);
+    }
+    cuts = cuts.filter(function (v, i, arr) { return i === 0 || v - arr[i - 1] >= 3; });
+    if (cuts[cuts.length - 1] !== (closed ? work.length - 1 : n - 1)) cuts.push(closed ? work.length - 1 : n - 1);
+    var out = ['M' + fmt(work[0][0]) + ' ' + fmt(work[0][1])];
+    for (var s = 0; s < cuts.length - 1; s++) {
+      var seg = work.slice(cuts[s], cuts[s + 1] + 1);
+      if (seg.length < 2) continue;
+      fitSpanLS(seg, tol, 0, out);
+    }
+    if (closed) out.push('Z');
+    return out.join(' ');
+  }
+
   function contourToPath(pts, closed, tol, corners) {
     if (pts.length < 3) return '';
     var n = pts.length;
@@ -835,7 +946,9 @@
               mapIters: opts.mapIters, mapData: opts.mapData,
               mapCurv: opts.mapCurv, corners: sm.corners })
           : sm.pts;
-        var piece = contourToPath(refined, closed, tol, sm.corners);
+        var piece = (opts.fitMode === 'ls')
+          ? contourToPathLS(refined, closed, tol, sm.corners)
+          : contourToPath(refined, closed, tol, sm.corners);
         if (piece) d += (d ? ' ' : '') + piece;
       }
       if (!d) continue;
