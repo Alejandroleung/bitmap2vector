@@ -597,6 +597,63 @@
   }
 
   // 相邻段合并：两段合成一段重拟合，残差达标就接受
+
+  // 直线化合并（Douglas-Peucker 思路的"输出后处理"版）：
+  // 等值线走出来的一条直边其实是几十段长短不一的小段（台阶状），逐段输出放大就是毛边。
+  // 官方一条直边只有一个 L（实测旗帜图官方 10 段 L，正好是五角星的 10 条边；我们原来 222 段）。
+  // 做法：把连续若干段的点并起来做最小二乘直线，只要
+  //   (a) 最大垂距 <= devTol，且
+  //   (b) 弦长/弧长 >= 0.985（真直边；弧线不满足）
+  // 就合并成一条 L。不满足条件立刻停止，不影响曲线段。
+  function lineFitOf(pts) {
+    var k, sx = 0, sy = 0;
+    for (k = 0; k < pts.length; k++) { sx += pts[k][0]; sy += pts[k][1]; }
+    sx /= pts.length; sy /= pts.length;
+    var sxx = 0, syy = 0, sxy = 0;
+    for (k = 0; k < pts.length; k++) {
+      var dx = pts[k][0] - sx, dy = pts[k][1] - sy;
+      sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+    }
+    var th = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+    var ux = Math.cos(th), uy = Math.sin(th), maxDev = 0;
+    for (k = 0; k < pts.length; k++) {
+      var ex = pts[k][0] - sx, ey = pts[k][1] - sy;
+      var dev = Math.abs(ex * uy - ey * ux);
+      if (dev > maxDev) maxDev = dev;
+    }
+    var t0 = (pts[0][0] - sx) * ux + (pts[0][1] - sy) * uy;
+    var t1 = (pts[pts.length - 1][0] - sx) * ux + (pts[pts.length - 1][1] - sy) * uy;
+    return {
+      p0: [sx + ux * t0, sy + uy * t0],
+      p1: [sx + ux * t1, sy + uy * t1],
+      maxDev: maxDev, chord: Math.abs(t1 - t0)
+    };
+  }
+  function arcLenOf(pts) {
+    var t = 0;
+    for (var k = 1; k < pts.length; k++) t += Math.hypot(pts[k][0] - pts[k-1][0], pts[k][1] - pts[k-1][1]);
+    return t;
+  }
+  function mergeCollinear(segs, devTol) {
+    var out = [], i = 0;
+    while (i < segs.length) {
+      var run = segs[i].points.slice(), j = i + 1, best = null;
+      while (j < segs.length) {
+        var cand = run.concat(segs[j].points.slice(1));
+        if (cand.length > 2000) break;
+        var f = lineFitOf(cand), al = arcLenOf(cand);
+        if (f.maxDev > devTol || al < 1e-6 || f.chord / al < 0.985) break;
+        run = cand; best = f; j++;
+      }
+      if (best && Math.abs(best.chord) > 2) {
+        out.push({ points: [best.p0, best.p1],
+          cmd: 'L' + fmt(best.p1[0]) + ' ' + fmt(best.p1[1]), type: 'L' });
+        i = j;
+      } else { out.push(segs[i]); i++; }
+    }
+    return out;
+  }
+
   function mergeSegments(segs, tol) {
     if (segs.length <= 1) return segs;
     var changed = true;
@@ -605,6 +662,18 @@
       changed = false;
       for (var i = 0; i < segs.length - 1; i++) {
         var a = segs[i], b = segs[i+1];
+        // 直线段之间也要合并！原实现 `if (a.type==='L'||b.type==='L') continue` 让
+        // 一条直边被切成几十段首尾相接的短 L（实测旗帜图 222 段 L，官方只有 10 段），
+        // 每段的端点都带半像素误差，放大后就是"毛边/锯齿"。合并后一条直边只剩一个 L。
+        if (a.type === 'L' && b.type === 'L') {
+          var mL = a.points.concat(b.points.slice(1));
+          if (mL.length <= 2000 && tryLine(mL, mergeTol)) {
+            segs.splice(i, 2, { points: mL,
+              cmd: 'L' + fmt(mL[mL.length-1][0]) + ' ' + fmt(mL[mL.length-1][1]), type: 'L' });
+            changed = true;
+          }
+          continue;
+        }
         if (a.type === 'L' || b.type === 'L') continue;
         var merged = a.points.concat(b.points.slice(1));
         if (merged.length > 2000) continue;
@@ -615,7 +684,8 @@
         }
       }
     }
-    return segs;
+    // 第二遍：共线直线合并（容差放宽到 0.75px，只对直线生效，不改变曲线）
+    return mergeCollinear(segs, Math.max(0.50, tol * 3.5));
   }
 
   // 兼容旧接口
@@ -657,20 +727,32 @@
   }
 
   // 对一段点（含首尾端点）做一次三次贝塞尔最小二乘，返回 {c1,c2,dev}
-  function fitCubicLS(seg) {
+  // 参数化方式：'chord' 弦长归一化 / 'uniform' 均匀 i/(n-1)。
+  // 运行期实测（frida）表明官方是**严格均匀**：n=4 个内部点对应 t=0.2/0.4/0.6/0.8，
+  // n=3 对应 0.25/0.5/0.75，142/142 次全部如此。
+  function paramAt(seg, i, n, mode) {
+    if (mode === 'uniform') return i / (n - 1);
+    return null;   // 由调用方用弦长表
+  }
+  function chordTable(seg) {
+    var acc = [0];
+    for (var i = 1; i < seg.length; i++) {
+      acc.push(acc[i - 1] + Math.hypot(seg[i][0] - seg[i - 1][0], seg[i][1] - seg[i - 1][1]));
+    }
+    return acc;
+  }
+
+  function fitCubicLS(seg, tmode) {
     var n = seg.length;
     if (n < 2) return null;
     var P0 = seg[0], P3 = seg[n - 1];
-    // 弦长参数化（首尾为 0 / 1）
-    var acc = [0];
-    for (var i = 1; i < n; i++) {
-      acc.push(acc[i - 1] + Math.hypot(seg[i][0] - seg[i - 1][0], seg[i][1] - seg[i - 1][1]));
-    }
-    var total = acc[n - 1];
+    var uniform = (tmode === 'uniform');
+    var acc = uniform ? null : chordTable(seg);
+    var total = uniform ? 1 : acc[n - 1];
     if (!(total > 1e-9)) return null;
     var M = [[0, 0], [0, 0]], vx = [0, 0], vy = [0, 0];
     for (var k = 0; k < n; k++) {
-      var t = acc[k] / total, u = 1 - t;
+      var t = uniform ? (k / (n - 1)) : (acc[k] / total), u = 1 - t;
       var b0 = u * u * u, b1 = 3 * u * u * t, b2 = 3 * u * t * t, b3 = t * t * t;
       var rx = seg[k][0] - (b0 * P0[0] + b3 * P3[0]);
       var ry = seg[k][1] - (b0 * P0[1] + b3 * P3[1]);
@@ -687,7 +769,7 @@
     // 最大偏差（用于决定是否分裂）
     var dev = 0, at = 0;
     for (var q = 0; q < n; q++) {
-      var tt = acc[q] / total, uu = 1 - tt;
+      var tt = uniform ? (q / (n - 1)) : (acc[q] / total), uu = 1 - tt;
       var w0 = uu * uu * uu, w1 = 3 * uu * uu * tt, w2 = 3 * uu * tt * tt, w3 = tt * tt * tt;
       var px = w0 * P0[0] + w1 * c1[0] + w2 * c2[0] + w3 * P3[0];
       var py = w0 * P0[1] + w1 * c1[1] + w2 * c2[1] + w3 * P3[1];
@@ -708,6 +790,96 @@
     }
     fitSpanLS(seg.slice(0, r.at + 1), tol, depth + 1, out);
     fitSpanLS(seg.slice(r.at), tol, depth + 1, out);
+  }
+
+  // ---------- C3. VM 原始调度：按 span 内点数选 三次/二次/直线，每 span 只拟合一次 ----------
+  // 依据 FUN_0049e960 + FUN_0049c7b0（docs/vm-algorithm-findings.md）：
+  //   n = span 内点数（含首尾）；n-2 = 内部点数
+  //   n-2 >= 4 → 三次最小二乘；n-2 == 3 → 二次；否则直线
+  //   t = 累计弦长 / 总弦长（FUN_0049c7b0 里逐点 SQRT 累加后乘 1/总长）
+  //   不做"残差超限就再切"的递归 —— VM 的切分来自分割阶段，不是拟合阶段。
+  function fitQuadLS(seg, tmode) {
+    var n = seg.length;
+    var P0 = seg[0], P2 = seg[n - 1];
+    var uniform = (tmode === 'uniform');
+    var acc = uniform ? null : chordTable(seg), i;
+    var total = uniform ? 1 : acc[n - 1];
+    if (!(total > 1e-9)) return null;
+    var a = 0, bx = 0, by = 0;
+    for (i = 0; i < n; i++) {
+      var t = uniform ? (i / (n - 1)) : (acc[i] / total), u = 1 - t;
+      var w = 2 * u * t;
+      var rx = seg[i][0] - (u * u * P0[0] + t * t * P2[0]);
+      var ry = seg[i][1] - (u * u * P0[1] + t * t * P2[1]);
+      a += w * w;
+      bx += w * rx; by += w * ry;
+    }
+    a += 1e-5;
+    if (!(a > 0)) return null;
+    return { c1: [bx / a, by / a], c2: null };
+  }
+
+  function fitSpanVM(seg, out, tmode) {
+    var n = seg.length;
+    var interior = n - 2;
+    var last = seg[n - 1];
+    if (interior >= 4) {
+      var r = fitCubicLS(seg, tmode);
+      if (!r) { out.push('L' + fmt(last[0]) + ' ' + fmt(last[1])); return; }
+      out.push('C' + fmt(r.c1[0]) + ' ' + fmt(r.c1[1]) + ' ' + fmt(r.c2[0]) + ' ' + fmt(r.c2[1]) +
+               ' ' + fmt(last[0]) + ' ' + fmt(last[1]));
+    } else if (interior === 3) {
+      var q = fitQuadLS(seg, tmode);
+      if (!q) { out.push('L' + fmt(last[0]) + ' ' + fmt(last[1])); return; }
+      // 二次 → 三次提升：C1 = P0 + 2/3(Q-P0)，C2 = P2 + 2/3(Q-P2)
+      var P0 = seg[0], P2 = last, Q = q.c1;
+      var c1x = P0[0] + 2 / 3 * (Q[0] - P0[0]), c1y = P0[1] + 2 / 3 * (Q[1] - P0[1]);
+      var c2x = P2[0] + 2 / 3 * (Q[0] - P2[0]), c2y = P2[1] + 2 / 3 * (Q[1] - P2[1]);
+      out.push('C' + fmt(c1x) + ' ' + fmt(c1y) + ' ' + fmt(c2x) + ' ' + fmt(c2y) +
+               ' ' + fmt(P2[0]) + ' ' + fmt(P2[1]));
+    } else {
+      out.push('L' + fmt(last[0]) + ' ' + fmt(last[1]));
+    }
+  }
+
+  function contourToPathVMFit(pts, closed, tol, corners, opts) {
+    opts = opts || {};
+    if (pts.length < 3) return '';
+    var n = pts.length, work = pts.slice(), cuts;
+    if (closed) {
+      if (corners.length) {
+        var rot = corners[0];
+        work = work.slice(rot).concat(work.slice(0, rot));
+        corners = corners.map(function (c) { return (c - rot + n) % n; }).sort(function (a, b) { return a - b; });
+      }
+      work.push([work[0][0], work[0][1]]);
+      cuts = [0].concat(corners.filter(function (c) { return c > 2 && c < n - 2; }), [work.length - 1]);
+    } else {
+      cuts = [0].concat(corners.filter(function (c) { return c > 2 && c < n - 2; }), [n - 1]);
+    }
+    cuts = cuts.filter(function (v, i, arr) { return i === 0 || v - arr[i - 1] >= 2; });
+    if (cuts[cuts.length - 1] !== (closed ? work.length - 1 : n - 1)) cuts.push(closed ? work.length - 1 : n - 1);
+    // 运行期实测（frida，docs/vm-algorithm-findings.md §3）：官方每个 span 只有 3–4 个点，
+    // 3 点走二次、4 点走三次。所以除了角点，还要按固定步长再切，避免长 span 用一根曲线硬贴。
+    var stride = opts.vmSpan == null ? 0 : Math.max(0, opts.vmSpan | 0);
+    if (stride >= 3) {
+      var dense = [cuts[0]];
+      for (var ci = 0; ci < cuts.length - 1; ci++) {
+        var a0 = cuts[ci], b0 = cuts[ci + 1];
+        var k0 = a0;
+        while (b0 - k0 > stride) { k0 += stride; dense.push(k0); }
+        dense.push(b0);
+      }
+      cuts = dense;
+    }
+    var out = ['M' + fmt(work[0][0]) + ' ' + fmt(work[0][1])];
+    for (var s = 0; s < cuts.length - 1; s++) {
+      var seg = work.slice(cuts[s], cuts[s + 1] + 1);
+      if (seg.length < 2) continue;
+      fitSpanVM(seg, out, opts.tmode);
+    }
+    if (closed) out.push('Z');
+    return out.join(' ');
   }
 
   function contourToPathLS(pts, closed, tol, corners) {
@@ -873,8 +1045,11 @@
     var noise = estimateNoise(labels, W, H);
     // 角点已定桩、分段平滑不会跨角，因此加大低通不会磨圆尖角，只影响边界的亚像素位置。
     // 干净输入保持 0 次以保精度与锐度；带噪输入按破碎度升到 3-6 次，把撕裂/振铃压成连续边界。
+    // 修：原式 `noise >= 0.12 ? 3 : 2` 恒 >= 2，注释里说的"干净输入保持 0 次"根本没发生。
+    // 实测（旗帜图 507×258，同一调色板）：blur0 MAE 0.0117 / blur1 0.0136 / blur2 0.0144，
+    // 且 blur2 会把星形尖角磨圆、削平（用户截图里的"线条不完整"就是它）。
     var blurIters = opts.blurIters == null
-      ? (noise >= 0.12 ? 3 : 2)
+      ? (noise >= 0.12 ? 3 : (noise >= 0.06 ? 1 : 0))
       : opts.blurIters;
 
     // 覆盖率只在"物理相邻的两种颜色"之间反解：用 8 邻域里真实出现的主导色
@@ -946,9 +1121,10 @@
               mapIters: opts.mapIters, mapData: opts.mapData,
               mapCurv: opts.mapCurv, corners: sm.corners })
           : sm.pts;
-        var piece = (opts.fitMode === 'ls')
-          ? contourToPathLS(refined, closed, tol, sm.corners)
-          : contourToPath(refined, closed, tol, sm.corners);
+        var piece;
+        if (opts.fitMode === 'vmfit') piece = contourToPathVMFit(refined, closed, tol, sm.corners, opts);
+        else if (opts.fitMode === 'ls') piece = contourToPathLS(refined, closed, tol, sm.corners);
+        else piece = contourToPath(refined, closed, tol, sm.corners);
         if (piece) d += (d ? ' ' : '') + piece;
       }
       if (!d) continue;

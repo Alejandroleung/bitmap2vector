@@ -799,6 +799,7 @@ input[type="range"]::-moz-range-thumb{
           <label class="exp-chk" title="setAdvUseContourAa：轮廓阶段用亚像素覆盖率定位边界"><input type="checkbox" id="advContourAa" checked> 轮廓 AA</label>
           <label class="exp-chk" title="setAdvUsePaletteAa：调色板阶段吸收抗锯齿混色"><input type="checkbox" id="advPaletteAa" checked> 调色板 AA</label>
           <label class="exp-chk" title="setAdvClusterColors：把过于接近的调色板色合并"><input type="checkbox" id="advCluster" checked> 颜色聚类</label>
+          <label class="exp-chk" title="保留红白之间那条过渡色带：像素差异略小，但放大看每个色块外圈会有一层脏边。关闭=过渡带剔除，边缘干净，与官方观感一致"><input type="checkbox" id="advKeepRim"> 保留抗锯齿色带</label>
         </div>
       </details>
     </div>
@@ -1118,7 +1119,7 @@ function handleFile(file){
 // 主色量化：按面积排序保留前 N 种主色，其余像素并入最接近的主色。
 // 目的：消除渐变、抗锯齿边缘、压缩噪点带来的杂色，让每个色块都是纯色。
 // 实现：5 位/通道直方图 + 面积加权 k-means（感知加权距离）+ 查找表重映射（O(像素数)）。
-function quantizeToColors(imgData, n){
+function quantizeToColors(imgData, n, keepRim){
   const d=imgData.data, len=d.length;
   n=Math.max(2,Math.min(64,n|0));
   const BINS=32768;                       // 32×32×32
@@ -1200,16 +1201,71 @@ function quantizeToColors(imgData, n){
     pal=top.map(s=>[Math.round(s.m[0]),Math.round(s.m[1]),Math.round(s.m[2])]);
   }
   // 色箱 → 最近主色的查找表，避免逐像素做 N 次距离计算
-  const lut=new Uint8Array(BINS);
-  for(let b=0;b<BINS;b++){
-    const r=(((b>>10)&31)<<3)+4, g=(((b>>5)&31)<<3)+4, bl=((b&31)<<3)+4;
-    let best=0, bd=Infinity;
-    for(let k=0;k<pal.length;k++){
-      const dr=r-pal[k][0], dg=g-pal[k][1], db=bl-pal[k][2];
-      const dist=dr*dr*0.299+dg*dg*0.587+db*db*0.114;
-      if(dist<bd){bd=dist;best=k}
+  const buildLut=function(palArr){
+    const L=new Uint8Array(BINS);
+    for(let b=0;b<BINS;b++){
+      const r=(((b>>10)&31)<<3)+4, g=(((b>>5)&31)<<3)+4, bl=((b&31)<<3)+4;
+      let best=0, bd=Infinity;
+      for(let k=0;k<palArr.length;k++){
+        const dr=r-palArr[k][0], dg=g-palArr[k][1], db=bl-palArr[k][2];
+        const dist=dr*dr*0.299+dg*dg*0.587+db*db*0.114;
+        if(dist<bd){bd=dist;best=k}
+      }
+      L[b]=best;
     }
-    lut[b]=best;
+    return L;
+  };
+  const labelOf=function(L){
+    const M=new Uint8Array(len>>2);
+    for(let p3=0;p3<(len>>2);p3++){
+      const bi3=((d[p3*4]>>3)<<10)|((d[p3*4+1]>>3)<<5)|(d[p3*4+2]>>3);
+      M[p3]=L[bi3];
+    }
+    return M;
+  };
+  let lut=buildLut(pal);
+
+  // ── 过渡带剔除（Rim removal）────────────────────────────────────────────
+  // 缩放/JPEG 会在两个实色之间留下一条"比两端都暗、都偏"的薄带。
+  // 它既不在两色连线上（segDist 判据抓不到），又因"薄但面积够"被当作结构色收进来，
+  // 结果每个白块外圈多一层脏边 —— 放大看就是锯齿+灰边，这是用户实测"效果非常差"的根因。
+  // 判据：自身像素少 + 四邻域几乎全是别的颜色（自邻接比例低）+ 颜色离某两色连线不远。
+  const rimDrop=[];
+  if(!keepRim){
+    const lab=labelOf(lut);
+    const selfAdj=new Uint32Array(pal.length), totAdj=new Uint32Array(pal.length);
+    for(let y=0;y<H2;y++){
+      const row=y*W2;
+      for(let x=0;x<W2;x++){
+        const i=row+x, l0=lab[i];
+        if(x>0){ totAdj[l0]++; if(lab[i-1]===l0) selfAdj[l0]++; }
+        if(x+1<W2){ totAdj[l0]++; if(lab[i+1]===l0) selfAdj[l0]++; }
+        if(y>0){ totAdj[l0]++; if(lab[i-W2]===l0) selfAdj[l0]++; }
+        if(y+1<H2){ totAdj[l0]++; if(lab[i+W2]===l0) selfAdj[l0]++; }
+      }
+    }
+    const area=new Uint32Array(pal.length);
+    for(let i=0;i<lab.length;i++) area[lab[i]]++;
+    for(let k=0;k<pal.length;k++){
+      const shareK=area[k]/lab.length;
+      if(shareK>0.05) continue;                                  // 大面积色块不动
+      const selfRatio=totAdj[k]?selfAdj[k]/totAdj[k]:1;
+      if(selfRatio>0.55) continue;                               // 有内部 → 真实结构
+      let near=1e9;
+      for(let a2=0;a2<pal.length;a2++){
+        if(a2===k) continue;
+        for(let b2=a2+1;b2<pal.length;b2++){
+          if(b2===k) continue;
+          const dd=segDist(pal[k],pal[a2],pal[b2]);
+          if(dd<near) near=dd;
+        }
+      }
+      if(near<45) rimDrop.push(k);
+    }
+    if(rimDrop.length){
+      pal=pal.filter(function(c,k){ return rimDrop.indexOf(k)<0; });
+      lut=buildLut(pal);
+    }
   }
   // 全分辨率重映射（不做抖动，保证色块干净）
   for(let i=0;i<len;i+=4){
@@ -1445,7 +1501,7 @@ async function doConvert(){
 
     // 主色量化：先按面积保留 N 种主色，其余并入最近主色（消除渐变/杂色）
     let qinfo=null;
-    try{ qinfo=quantizeToColors(imgData,opts.numberofcolors); }catch(e){ qinfo=null; }
+    try{ qinfo=quantizeToColors(imgData,opts.numberofcolors, !!($("advKeepRim")&&$("advKeepRim").checked)); }catch(e){ qinfo=null; }
     // 把量化后的调色板直接交给 ImageTracer（options.pal）。
     // 否则它会对已量化的图再做一次自己的 k-means，面积小的主色（如小面积红块）会被合并掉，
     // 出现"选了 3 色却只出 2 色"的丢色问题。
