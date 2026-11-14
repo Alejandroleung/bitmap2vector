@@ -35,7 +35,11 @@
   // ---------- A. 颜色 / 覆盖率查找表 ----------
   // 每个色箱预计算：主导色 label、次色 other、次色覆盖率 mix(0..0.5]。
   // 抗锯齿像素 C ≈ (1-t)*P_i + t*P_j 时，t 就是 P_j 的覆盖率观测值。
-  function buildColorLUT(palette) {
+  function buildColorLUT(palette, opt) {
+    opt = opt || {};
+    var PURE = opt.pure == null ? 64 : opt.pure;            // 纯色判定（到最近主色距离²）
+    var MINSEG2 = opt.minSeg2 == null ? 400 : opt.minSeg2;  // 两主色至少差多少才谈得上混合
+    var PERP = opt.perp == null ? 34 : opt.perp;            // 混合点到两色连线的垂距上限
     var K = palette.length;
     var label = new Uint8Array(BINS), other = new Uint8Array(BINS);
     var mix = new Float32Array(BINS);
@@ -51,16 +55,16 @@
         else if (dist < d1) { d1 = dist; i1 = k; }
       }
       label[b] = i0; other[b] = i1; mix[b] = 0;
-      if (K < 2 || d0 < 64) continue;                    // 纯色像素，无需混合
+      if (K < 2 || d0 < PURE) continue;                  // 纯色像素，无需混合
       var A = palette[i0], B = palette[i1];
       var ax = B[0] - A[0], ay = B[1] - A[1], az = B[2] - A[2];
       var a2 = ax * ax + ay * ay + az * az;
-      if (a2 < 400) continue;                            // 两主色太接近
+      if (a2 < MINSEG2) continue;                        // 两主色太接近
       var t = ((r - A[0]) * ax + (g - A[1]) * ay + (bl - A[2]) * az) / a2;
       if (t < 0.04 || t > 0.96) continue;                // 基本还是纯色
       var px = A[0] + ax * t, py = A[1] + ay * t, pz = A[2] + az * t;
       var perp = Math.sqrt((r - px) * (r - px) + (g - py) * (g - py) + (bl - pz) * (bl - pz));
-      if (perp > 34) continue;                           // 不是这两色的线性混合（JPEG 噪声等）
+      if (perp > PERP) continue;                         // 不是这两色的线性混合（JPEG 噪声等）
       if (t > 0.5) { label[b] = i1; other[b] = i0; mix[b] = 1 - t; }
       else { label[b] = i0; other[b] = i1; mix[b] = t; }
     }
@@ -106,6 +110,94 @@
           var pp = cells[c2];
           labels[pp] = best; others[pp] = best; mixes[pp] = 0;
         }
+      }
+    }
+  }
+
+  // ---------- A3. 抗锯齿伪影剔除（对应 setAdvAntiAliasingRejection 的 4 档）----------
+  // 判据：一块小区域，如果它的颜色正好落在「两个邻块颜色」的连线上（允许一定垂距），
+  // 那它不是图形的一部分，而是这两个颜色之间的抗锯齿像素——并进面积更大的那一侧。
+  // 档位只影响「多大面积 / 多宽容差」算残留：1 档 ≤12px/垂距≤10，2 档 ≤48px/≤16，3 档 ≤160px/≤24。
+  function rejectAaArtifacts(labels, W, H, palette, K, level) {
+    var MAXA = [0, 12, 48, 160][level] || 12;
+    var TOL = [0, 10, 16, 24][level] || 10;
+    // 厚度 = 2·面积/周长。抗锯齿残留是 1–2px 宽的细条（厚度≈1–2），
+    // 真实的小形状（星尖、标点）是紧凑块（厚度≈3 以上）。没有这道约束时，
+    // 1 档就会把 Logo 上的小笔画并掉，MAE 从 0.0069 涨到 0.0083。
+    var THICK = [0, 2.5, 4, 6][level] || 2.5;
+    var N = W * H, seen = new Uint8Array(N), stack = new Int32Array(N);
+    for (var s = 0; s < N; s++) {
+      if (seen[s]) continue;
+      var lab = labels[s], sp = 0;
+      stack[sp++] = s; seen[s] = 1;
+      var cells = [];
+      var tooBig = false;
+      while (sp > 0) {
+        var p0 = stack[--sp]; cells.push(p0);
+        if (cells.length > MAXA) { tooBig = true; break; }
+        var x = p0 % W, y = (p0 / W) | 0;
+        for (var dy = -1; dy <= 1; dy++) for (var dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          var nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          var q = ny * W + nx;
+          if (!seen[q] && labels[q] === lab) { seen[q] = 1; stack[sp++] = q; }
+        }
+      }
+      if (tooBig) continue;
+      // 周长统计（4 邻域里与区域本身不同的边数）→ 厚度
+      var perim = 0;
+      for (var ci0 = 0; ci0 < cells.length; ci0++) {
+        var cp0 = cells[ci0], cx0 = cp0 % W, cy0 = (cp0 / W) | 0;
+        for (var j0 = 0; j0 < 4; j0++) {
+          var ax0 = cx0 + (j0 === 0 ? -1 : j0 === 1 ? 1 : 0);
+          var ay0 = cy0 + (j0 === 2 ? -1 : j0 === 3 ? 1 : 0);
+          if (ax0 < 0 || ay0 < 0 || ax0 >= W || ay0 >= H) { perim++; continue; }
+          if (labels[ay0 * W + ax0] !== lab) perim++;
+        }
+      }
+      var thick = perim > 0 ? (2 * cells.length) / perim : 99;
+      if (thick > THICK) continue;             // 紧凑块 → 是真图形，不动
+      var votes = {}, bestA = -1, bestB = -1, nA = 0, nB = 0;
+      for (var ci = 0; ci < cells.length; ci++) {
+        var cp = cells[ci], cx = cp % W, cy = (cp / W) | 0;
+        for (var j = 0; j < 4; j++) {
+          var ax = cx + (j === 0 ? -1 : j === 1 ? 1 : 0);
+          var ay = cy + (j === 2 ? -1 : j === 3 ? 1 : 0);
+          if (ax < 0 || ay < 0 || ax >= W || ay >= H) continue;
+          var v = labels[ay * W + ax];
+          if (v === lab || v >= K) continue;
+          votes[v] = (votes[v] || 0) + 1;
+          if (votes[v] > nA) { nA = votes[v]; bestA = v; }
+        }
+      }
+      for (var vk in votes) {
+        var vi = vk | 0;
+        if (vi === bestA) continue;
+        if (votes[vi] > nB) { nB = votes[vi]; bestB = vi; }
+      }
+      if (bestA < 0) continue;
+      var target = -1;
+      if (bestB < 0) {
+        target = bestA;                                   // 只有一个邻块：孤岛，直接并
+      } else {
+        var S = palette[lab], A = palette[bestA], B = palette[bestB];
+        var bx = B[0] - A[0], by = B[1] - A[1], bz = B[2] - A[2];
+        var b2 = bx * bx + by * by + bz * bz;
+        if (b2 < 400) target = bestA;
+        else {
+          var t = ((S[0] - A[0]) * bx + (S[1] - A[1]) * by + (S[2] - A[2]) * bz) / b2;
+          if (t < 0.08 || t > 0.92) target = -1;          // 不在两色之间 → 是真图形，保留
+          else {
+            var px = A[0] + bx * t, py = A[1] + by * t, pz = A[2] + bz * t;
+            var perp = Math.sqrt((S[0]-px)*(S[0]-px)+(S[1]-py)*(S[1]-py)+(S[2]-pz)*(S[2]-pz));
+            if (perp > TOL) target = -1;                  // 明显偏离连线 → 保留
+            else target = nA >= nB ? bestA : bestB;       // 并进票数多的那一侧
+          }
+        }
+      }
+      if (target >= 0) {
+        for (var c2 = 0; c2 < cells.length; c2++) labels[cells[c2]] = target;
       }
     }
   }
@@ -598,8 +690,49 @@
     // trapping 描边会让每层边界向外膨胀 stroke/2，实测对印刷级对齐是负贡献，默认关闭。
     var trap = opts.trapStroke == null ? 0 : opts.trapStroke;
 
+    // ── 与 Vector Magic 高级向导对齐的三组开关（证据见 docs/vm-binary-symbols.md）──
+    // setAdvUsePaletteAa / setAdvUseContourAa 是**两个独立开关**，分属两个阶段：
+    //   aaPalette 关 = 调色板阶段不吃抗锯齿混色（把像素按最近主色硬归类）；
+    //   aaContour 关 = 轮廓阶段只用硬标签做等值线（边界钉在像素格上，等于硬边图稿模式）。
+    var aaPalette = opts.aaPalette == null ? true : !!opts.aaPalette;
+    var aaContour = opts.aaContour == null ? true : !!opts.aaContour;
+    // setAdvAntiAliasingRejection(int)：0..3 档，不是 bool。档位越高，越激进的把
+    // "颜色正好落在两个邻色连线上"的小碎块判成抗锯齿残留并并入邻块。
+    var aaReject = opts.aaReject == null ? 0 : clamp(opts.aaReject | 0, 0, 3);
+    // setAdvColorSensitivity(int)：0..100，控制"多接近的颜色才算同一条边上的混合"。
+    var sens = opts.colorSensitivity == null ? 70 : clamp(opts.colorSensitivity, 0, 100);
+    // setAdvClusterColors(bool)：分割完再把调色板里过于接近的两色合并。
+    var clusterColors = opts.clusterColors == null ? true : !!opts.clusterColors;
 
-    var lut = buildColorLUT(palette);
+    // 敏感度 → LUT 的三个阈值（线性映射，两端都实测过）：
+    //   低敏（0）：只认强边（纯色判定宽、垂距容忍小）；高敏（100）：连 3–4 级的细微混色也反解。
+    // 以 sens=70 为原点：此时三个阈值正好等于既有标定值（64 / 400 / 34），
+    // 保证加了这层开关之后默认表现不变，往两侧调才生效。
+    var lutOpt = {
+      pure: Math.round(clamp(64 + (70 - sens) * 1.0, 24, 160)),
+      minSeg2: Math.round(clamp(400 + (70 - sens) * 8, 120, 1400)),
+      perp: Math.round(clamp(34 + (sens - 70) * 0.25, 12, 50))
+    };
+
+    // clusterColors：先把过于接近的调色板色并掉，再建 LUT
+    if (clusterColors && palette.length > 2) {
+      var merged = [], mapIdx = [];
+      for (var pi = 0; pi < K; pi++) {
+        var hit = -1;
+        for (var mi = 0; mi < merged.length; mi++) {
+          var dr0 = palette[pi][0] - merged[mi][0], dg0 = palette[pi][1] - merged[mi][1], db0 = palette[pi][2] - merged[mi][2];
+          if (Math.sqrt(dr0 * dr0 + dg0 * dg0 + db0 * db0) < Math.max(6, 30 - sens * 0.2)) { hit = mi; break; }
+        }
+        if (hit < 0) { merged.push(palette[pi].slice()); hit = merged.length - 1; }
+        mapIdx[pi] = hit;
+      }
+      if (merged.length < palette.length) {
+        palette = merged;
+        K = merged.length;
+      }
+    }
+
+    var lut = buildColorLUT(palette, lutOpt);
     var labels = new Uint8Array(N), others = new Uint8Array(N), mixes = new Float32Array(N);
     var counts = new Int32Array(K);
     for (var p = 0; p < N; p++) {
@@ -621,6 +754,11 @@
       }
     }
     mergeTinyRegions(labels, others, mixes, W, H, minArea);
+    if (aaReject > 0) rejectAaArtifacts(labels, W, H, palette, K, aaReject);
+    // 调色板阶段不吃混色：把所有像素按最近主色硬归类（split 阶段就没有"两色覆盖率"了）
+    if (!aaPalette) {
+      for (var zi = 0; zi < N; zi++) { others[zi] = labels[zi]; mixes[zi] = 0; }
+    }
     var noise = estimateNoise(labels, W, H);
     // 角点已定桩、分段平滑不会跨角，因此加大低通不会磨圆尖角，只影响边界的亚像素位置。
     // 干净输入保持 0 次以保精度与锐度；带噪输入按破碎度升到 3-6 次，把撕裂/振铃压成连续边界。
@@ -668,7 +806,10 @@
       var any = false, full = true;
       for (var q = 0; q < N; q++) {
         var v = 0;
-        if (labels[q] === k) v = 1 - mixes[q];
+        if (!aaContour) {
+          // 轮廓阶段不吃混色：硬标签等值线，边界钉在像素格上（= 硬边图稿模式）
+          v = labels[q] === k ? 1 : 0;
+        } else if (labels[q] === k) v = 1 - mixes[q];
         else if (others[q] === k) v = mixes[q];
         field[q] = v;
         if (v > 0.5) any = true;
@@ -676,8 +817,9 @@
       }
       if (!any || full) continue;
       var rawField = (opts.mapIters > 0) ? field.slice() : null;
-      blurField(field, W, H, blurIters);
-      var segs = marchingSquares(field, W, H, level);
+      if (aaContour) blurField(field, W, H, blurIters);     // 硬标签场不要低通，否则又把边界糊回去
+      var marchLevel = aaContour ? level : 0.5;
+      var segs = marchingSquares(field, W, H, marchLevel);
       if (!segs.length) continue;
       var contours = linkContours(segs, 6);
       var d = '';

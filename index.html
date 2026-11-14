@@ -423,6 +423,23 @@ input[type="range"]::-moz-range-thumb{
   transition:width .3s ease;
 }
 
+/* ---------- 高级设置（对齐 Vector Magic 高级向导）---------- */
+.adv{margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+.adv > summary{
+  display:flex;align-items:center;gap:8px;cursor:pointer;list-style:none;
+  font-size:12.5px;font-weight:700;color:var(--txt);user-select:none;
+}
+.adv > summary::-webkit-details-marker{display:none}
+.adv > summary::before{
+  content:"▸";font-size:11px;color:var(--txt-3);transition:transform .15s;
+}
+.adv[open] > summary::before{transform:rotate(90deg)}
+.adv-hint{font-size:10.5px;font-weight:600;color:var(--txt-3);letter-spacing:0}
+.adv-grid{margin-top:14px}
+.adv-sliders{display:flex;flex-direction:column;gap:12px;margin-top:14px}
+.adv-sliders .slider-line > label{width:64px}
+.adv-checks{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px}
+
 /* ---------- EXPORT BAR（多格式导出，对齐 Vector Magic 1.15 的导出面）---------- */
 .export-bar{
   display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;
@@ -713,6 +730,77 @@ input[type="range"]::-moz-range-thumb{
           <input type="number" id="printWidthMm" value="100" min="5" max="5000" step="1" title="PDF 成品宽度（mm），高度按图片比例自动换算">
         </div>
       </div>
+
+      <!-- 高级设置：字段名与 Vector Magic 高级向导一致（证据见 docs/vm-binary-symbols.md） -->
+      <details class="adv" id="advBox">
+        <summary>高级设置 <span class="adv-hint">图像类型 · 颜色模式 · 分割 · 平滑 · AA</span></summary>
+
+        <div class="field-grid adv-grid">
+          <div class="field">
+            <label title="对应 setInputMode：照片 / 抗锯齿图稿 / 硬边图稿">图像类型</label>
+            <select id="advImageType">
+              <option value="aa" selected>抗锯齿图稿</option>
+              <option value="photo">照片</option>
+              <option value="aliased">硬边图稿（无抗锯齿）</option>
+            </select>
+          </div>
+          <div class="field">
+            <label title="对应 setInputQuality：描述输入质量，不是输出">输入质量</label>
+            <select id="advQuality">
+              <option value="high">高（干净）</option>
+              <option value="medium" selected>中</option>
+              <option value="low">低（噪 / JPEG）</option>
+            </select>
+          </div>
+          <div class="field">
+            <label title="对应 setPaletteMode：灵活 / 固定 / 双色">颜色模式</label>
+            <select id="advPaletteMode">
+              <option value="flexible" selected>灵活调色板</option>
+              <option value="fixed">固定调色板（用上面的颜色数量）</option>
+              <option value="two">双色</option>
+            </select>
+          </div>
+          <div class="field">
+            <label title="对应 setAdvAntiAliasingRejection：0..3 档">AA 伪影剔除</label>
+            <select id="advAaReject">
+              <option value="0" selected>关</option>
+              <option value="1">低</option>
+              <option value="2">中</option>
+              <option value="3">高</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="adv-sliders">
+          <div class="slider-line">
+            <label>分割复杂度</label>
+            <input type="range" id="advSeg" min="0" max="100" value="60">
+            <span class="slider-val" id="advSegVal">60</span>
+          </div>
+          <div class="slider-line">
+            <label>轮廓平滑度</label>
+            <input type="range" id="advSmooth" min="0" max="100" value="0">
+            <span class="slider-val" id="advSmoothVal">0</span>
+          </div>
+          <div class="slider-line">
+            <label>曲线复杂度</label>
+            <input type="range" id="advCurve" min="0" max="100" value="85">
+            <span class="slider-val" id="advCurveVal">85</span>
+          </div>
+          <div class="slider-line">
+            <label>颜色敏感度</label>
+            <input type="range" id="advSens" min="0" max="100" value="70">
+            <span class="slider-val" id="advSensVal">70</span>
+          </div>
+        </div>
+
+        <div class="adv-checks">
+          <label class="exp-chk" title="setAdvDetectSharpCorners"><input type="checkbox" id="advCorners" checked> 尖角检测</label>
+          <label class="exp-chk" title="setAdvUseContourAa：轮廓阶段用亚像素覆盖率定位边界"><input type="checkbox" id="advContourAa" checked> 轮廓 AA</label>
+          <label class="exp-chk" title="setAdvUsePaletteAa：调色板阶段吸收抗锯齿混色"><input type="checkbox" id="advPaletteAa" checked> 调色板 AA</label>
+          <label class="exp-chk" title="setAdvClusterColors：把过于接近的调色板色合并"><input type="checkbox" id="advCluster" checked> 颜色聚类</label>
+        </div>
+      </details>
     </div>
 
     <div class="panel">
@@ -1238,6 +1326,70 @@ function analyzeImage(canvas){
   return {colors:cm.size,edge:ec?edge/ec:0,noise:nc?Math.sqrt(noise/nc):0};
 }
 
+// ============ 高级设置（对齐 Vector Magic 高级向导的字段语义）============
+// 证据：vmde.exe 里残留的 setAdv*/setInputMode/setPaletteMode 等签名字符串，
+// 见 docs/vm-binary-symbols.md。这里把它们落成真正的引擎参数。
+const ADV_SLIDERS=[["advSeg","advSegVal"],["advSmooth","advSmoothVal"],["advCurve","advCurveVal"],["advSens","advSensVal"]];
+function syncAdvLabels(){
+  ADV_SLIDERS.forEach(([id,out])=>{
+    const el=$(id), o=$(out);
+    if(el&&o) o.textContent=el.value;
+  });
+}
+// 4 档「线条拟合」= 快捷预设，写进高级设置（高级设置才是真正的参数源）
+const ADV_PRESETS={
+  0:{seg:100,smooth:0,curve:92,corners:true, quality:"high", type:"aa"},
+  1:{seg:100,smooth:0,curve:83,corners:true, quality:"medium",type:"aa"},
+  2:{seg:40, smooth:33,curve:65,corners:true, quality:"medium",type:"aa"},
+  3:{seg:20, smooth:83,curve:19,corners:false,quality:"low",  type:"aa"},
+};
+function applyAdvPreset(lt){
+  const p=ADV_PRESETS[lt]||ADV_PRESETS[1];
+  if($("advSeg")) $("advSeg").value=p.seg;
+  if($("advSmooth")) $("advSmooth").value=p.smooth;
+  if($("advCurve")) $("advCurve").value=p.curve;
+  if($("advCorners")) $("advCorners").checked=p.corners;
+  if($("advQuality")) $("advQuality").value=p.quality;
+  if($("advImageType")) $("advImageType").value=p.type;
+  syncAdvLabels();
+}
+function readAdvanced(){
+  const type=$("advImageType")?$("advImageType").value:"aa";
+  const q=$("advQuality")?$("advQuality").value:"medium";
+  const seg=+($("advSeg")||{value:100}).value;
+  const sm=+($("advSmooth")||{value:0}).value;
+  const cv=+($("advCurve")||{value:83}).value;
+  const sens=+($("advSens")||{value:70}).value;
+  const umin=Math.max(2,Math.round((+($("minArea")&&$("minArea").value||1))*8));
+  // 类型：照片走更重的低通；硬边图稿彻底关掉两级 AA（边界钉在像素格上）
+  let aaOn=type!=="aliased", blur=0, level=0.44;
+  if(type==="photo"){ blur=1; level=0.46; }
+  if(type==="aliased"){ level=0.50; }
+  if(q==="low") blur+=1;                     // 低质量输入多一级低通
+  // 分割复杂度：越低越倾向于把碎块并掉（等价于放大"最小像素"）
+  const segScale=1+Math.max(0,60-seg)/60*6;
+  return {
+    aaPalette:($("advPaletteAa")?$("advPaletteAa").checked:true)&&aaOn,
+    aaContour:($("advContourAa")?$("advContourAa").checked:true)&&aaOn,
+    aaReject:+($("advAaReject")||{value:0}).value,
+    colorSensitivity:sens,
+    clusterColors:!!($("advCluster")&&$("advCluster").checked),
+    smoothPasses:Math.round(sm/100*24),
+    prior:0.60-sm/100*0.20,
+    cornerThresh:($("advCorners")&&$("advCorners").checked)?0.80:1.40,
+    bezierTol:0.06+(100-cv)/100*0.54,
+    blurIters:blur,
+    level:level,
+    minArea:Math.max(2,Math.round(umin*segScale)),
+  };
+}
+ADV_SLIDERS.forEach(([id])=>{
+  const el=$(id);
+  if(el) el.addEventListener("input",syncAdvLabels);
+});
+if($("lineFilter")) $("lineFilter").addEventListener("change",e=>applyAdvPreset(+e.target.value));
+applyAdvPreset(1);
+
 // ============ CONVERT ============
 async function doConvert(){
   if(!currentFile)return;
@@ -1248,8 +1400,9 @@ async function doConvert(){
     // 平滑拟合阈值：ImageTracer 的 ltres/qtres 与"允许的边缘偏差²"直接比较。
     // 取太小（如 0.5，仅容忍 0.7px 偏差）会把每个像素台阶和 JPEG 边缘噪声原样描成锯齿。
     // ltres 控制直线段拟合（越低越贴像素格），qtres 控制曲线拟合；pathomit 丢弃短碎路径。
+    const palMode=($("advPaletteMode")&&$("advPaletteMode").value)||"flexible";
     const opts={
-      numberofcolors:+$("numberOfColors").value||16,
+      numberofcolors: palMode==="two" ? 2 : (+$("numberOfColors").value||16),
       minarea:+$("minArea").value||1,
       blurradius:0,
       linefilter:lt===0,            // 剔除少于 3 段的碎屑路径（仅精细档）
@@ -1320,23 +1473,11 @@ async function doConvert(){
       // 关闭无数据项的 Taubin 平滑与 trapping 描边（两者实测都会推离官方边界）。
       // 四档语义：越靠前越贴官方输出（节点更多），越靠后越省节点/更平滑。
       // 不传 blurIters：引擎按边界破碎度自适应，上限 2 级（原 6 级是负贡献）。
-      // 参数标定：以 ScreenShot_2026-10-24_173722_035（红底 + 白色新月五星）实测，
-      // 用官方 PDF 做参照跑栅格差异，逐项定了下面这组默认值：
-      //   · blurIters 必须显式给 0：自适应降噪会把 1–2px 的深色外框糊掉，
-      //     差异从 0.0096 恶化到 0.0153；
-      //   · level 0.44 比 0.5 更贴官方（MAE 0.0101→0.0096）；
-      //   · cornerThresh 0.8 保住星角，超过 1.3 星尖会被削圆。
-      const vmOpts={
-        smoothPasses:[0,0,8,20][lt]||0,
-        prior:[0.60,0.60,0.50,0.40][lt]||0.60,
-        cornerThresh:[0.80,0.90,1.00,1.20][lt]||0.80,
-        bezierTol:[0.10,0.15,0.25,0.50][lt]||0.10,
-        blurIters:[0,0,1,2][lt]||0,
-        minArea:Math.max(2,(+$("minArea").value||1)*8),
-        level:[0.44,0.44,0.46,0.48][lt]||0.44,
-        trapStroke:0,        // 0.5px 描边会让每层边界膨胀，实测增大差异
-        labelData:imgData,   // 量化器已处理过的离散分割结果（含过渡色吸收）
-      };
+      // 引擎参数来自「高级设置」：4 档线条拟合只是快捷预设，真正生效的是滑块/开关。
+      // 默认值（抗锯齿图稿 / 中等输入质量 / 分割 100 / 平滑 0 / 曲线 83 / 尖角开）
+      // 与上一轮标定结果完全一致：blur 0、level 0.44、tol 0.15、minArea=用户值×8。
+      const adv=readAdvanced();
+      const vmOpts=Object.assign({trapStroke:0, labelData:imgData}, adv);
       const t0=performance.now();
       const res=window.VMTracer.trace(new ImageData(origRGB,imgData.width,imgData.height),pal,vmOpts);
       svg=res.svg;
