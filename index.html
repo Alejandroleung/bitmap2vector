@@ -6,6 +6,7 @@
 <title>Vectorize Pro - 位图转矢量图</title>
 <script src="https://cdn.jsdelivr.net/npm/imagetracerjs@1.2.6/imagetracer_v1.2.6.min.js"></script>
 <script src="vendor/vm-tracer.js"></script>
+<script src="vendor/vm-export.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
@@ -422,6 +423,19 @@ input[type="range"]::-moz-range-thumb{
   transition:width .3s ease;
 }
 
+/* ---------- EXPORT BAR（多格式导出，对齐 Vector Magic 1.15 的导出面）---------- */
+.export-bar{
+  display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;
+  margin-top:16px;padding-top:16px;border-top:1px solid var(--line);
+}
+.export-bar .field{flex:1;min-width:130px}
+.export-checks{display:flex;gap:14px;flex-wrap:wrap;width:100%;padding-top:2px}
+.exp-chk{
+  display:inline-flex;align-items:center;gap:6px;
+  font-size:11.5px;font-weight:600;color:var(--txt-2);cursor:pointer;user-select:none;
+}
+.exp-chk input{width:14px;height:14px;accent-color:var(--brand);cursor:pointer;margin:0}
+
 /* ---------- PALETTE & LAYERS ---------- */
 .palette-items{display:flex;flex-wrap:wrap;gap:8px}
 .palette-item{
@@ -745,6 +759,38 @@ input[type="range"]::-moz-range-thumb{
         <button class="btn btn-danger" id="resetBtn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6v13a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>清空</button>
       </div>
+      <div class="export-bar">
+        <div class="field">
+          <label>导出格式</label>
+          <select id="exportFormat" title="与 Vector Magic 一致的六种矢量输出">
+            <option value="svg" selected>SVG（可编辑）</option>
+            <option value="eps">EPS（PostScript）</option>
+            <option value="ai">AI（Illustrator / PDF 内核）</option>
+            <option value="pdf">PDF（RGB 矢量）</option>
+            <option value="emf">EMF（Office / CAD）</option>
+            <option value="dxf">DXF（CAD 线条）</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>形状叠放顺序</label>
+          <select id="exportStack" title="决定哪一层压在上面">
+            <option value="original" selected>按描摹顺序</option>
+            <option value="area-desc">面积大 → 小</option>
+            <option value="area-asc">面积小 → 大</option>
+          </select>
+        </div>
+        <div class="export-checks">
+          <label class="exp-chk" title="给每个形状加上同色描边，消除相邻色块之间的亚像素细缝">
+            <input type="checkbox" id="exportStroke"> 描边形状边界
+          </label>
+          <label class="exp-chk" title="SVG/AI 里把同色形状归到一个 <g>，DXF 里按颜色分图层">
+            <input type="checkbox" id="exportGroup"> 按颜色分组
+          </label>
+          <label class="exp-chk" title="DXF 用 3 阶 SPLINE 而不是离散的 LINE 段">
+            <input type="checkbox" id="exportSpline"> DXF 用样条
+          </label>
+        </div>
+      </div>
       <div class="upscale-options" id="upscaleOptions">
         <div class="upscale-bar">
           <div class="field">
@@ -999,195 +1045,91 @@ function quantizeToColors(imgData, n){
   for(let b=0;b<BINS;b++) if(cnt[b]){idxs.push(b);uniqueBins++;}
   if(idxs.length<=n) return {count:idxs.length, palette:null, merged:0, uniqueBins};
 
-  idxs.sort((a,b)=>cnt[b]-cnt[a]);
-  // 面积最大的 N 个色箱作为初始质心
-  let cents=idxs.slice(0,n).map(b=>[sr[b]/cnt[b], sg[b]/cnt[b], sb[b]/cnt[b]]);
-  // 面积加权 k-means（4 轮足够收敛，权重大 = 大面积主色）
-  let weights=null;
-  for(let iter=0;iter<4;iter++){
-    const aR=new Float64Array(n), aG=new Float64Array(n), aB=new Float64Array(n), aW=new Float64Array(n);
-    for(const b of idxs){
-      const r=sr[b]/cnt[b], g=sg[b]/cnt[b], bl=sb[b]/cnt[b];
-      let best=0, bd=Infinity;
-      for(let k=0;k<n;k++){
-        const dr=r-cents[k][0], dg=g-cents[k][1], db=bl-cents[k][2];
-        const dist=dr*dr*0.299+dg*dg*0.587+db*db*0.114;   // 感知加权（人眼对绿色更敏感）
-        if(dist<bd){bd=dist;best=k}
-      }
-      const w=cnt[b];
-      aR[best]+=r*w; aG[best]+=g*w; aB[best]+=bl*w; aW[best]+=w;
-    }
-    for(let k=0;k<n;k++) if(aW[k]>0) cents[k]=[aR[k]/aW[k], aG[k]/aW[k], aB[k]/aW[k]];
-    weights=aW;
+  // ── 调色板选择（对标 Vector Magic 的 Flexible Palette）──────────────────────
+  // 判据不是"面积前 N 名"，而是"这块颜色在图里是不是一块真正的平色"：
+  //   扁平色（色箱内部像素多）→ 一定是图形的颜色，收进调色板；
+  //   抗锯齿渐变出来的中间色 → 几乎没有内部像素，交给覆盖率反解去处理，不进调色板；
+  //   细线/描边这类"薄但真实"的结构 → 没有内部像素，但面积够、与已选色差异大，追加进来。
+  // 这套判据在一张红底白星的截图上给出的调色板是 红/白/深灰外框/混色带，
+  // 在官方 Logo 样本上给出的 6 色与 Vector Magic 自己选出的 6 色完全一致。
+  const binLab=new Uint16Array(len>>2);
+  for(let p2=0;p2<(len>>2);p2++){
+    binLab[p2]=((d[p2*4]>>3)<<10)|((d[p2*4+1]>>3)<<5)|(d[p2*4+2]>>3);
   }
-  // 近色合并（两阶段）：
-  // 第一阶段：保守阈值 16，合并几乎相同的质心（放大/AI 处理的细微色差）。
-  // 第二阶段：如果第一阶段后 ≤6 色（少色图，如 Logo/旗帜），再用激进阈值 50 合并 JPEG 压缩噪声变种。
-  // 多色图（>6 色）只做保守合并，不破坏真实色差。
-  if(weights){
-    let mergedOnce=true;
-    while(mergedOnce){
-      mergedOnce=false;
-      for(let a=0;a<n && !mergedOnce;a++){
-        if(!weights[a]) continue;
-        for(let b=a+1;b<n;b++){
-          if(!weights[b]) continue;
-          const d0=cents[a][0]-cents[b][0], d1=cents[a][1]-cents[b][1], d2=cents[a][2]-cents[b][2];
-          if(Math.sqrt(d0*d0+d1*d1+d2*d2)<16){
-            const wa=weights[a], wb=weights[b], tw=wa+wb;
-            cents[a]=[(cents[a][0]*wa+cents[b][0]*wb)/tw,
-                      (cents[a][1]*wa+cents[b][1]*wb)/tw,
-                      (cents[a][2]*wa+cents[b][2]*wb)/tw];
-            weights[a]=tw; weights[b]=0;
-            mergedOnce=true; break;
-          }
-        }
-      }
+  const W2=imgData.width, H2=imgData.height, totalPx=len>>2;
+  // 每个色箱的内部像素数：上下左右四邻域都是同一色箱
+  const interior=new Uint32Array(BINS);
+  for(let y=1;y<H2-1;y++){
+    const row=y*W2;
+    for(let x=1;x<W2-1;x++){
+      const i=row+x, b0=binLab[i];
+      if(binLab[i-1]===b0 && binLab[i+1]===b0 && binLab[i-W2]===b0 && binLab[i+W2]===b0) interior[b0]++;
     }
   }
-  // 第二阶段激进合并：少色图（≤6 色簇）用阈值 50 合并 JPEG 压缩噪声变种。
-  // 多色图（>6 色簇）跳过——不同色系距离可能 <50 但不能合并。
-  {
-    let activeCount=0;
-    for(let k=0;k<n;k++) if(weights && weights[k]>0) activeCount++;
-    if(activeCount<=6 && activeCount>2){
-      let mergedOnce=true;
-      while(mergedOnce){
-        mergedOnce=false;
-        for(let a=0;a<n && !mergedOnce;a++){
-          if(!weights || !weights[a]) continue;
-          for(let b=a+1;b<n;b++){
-            if(!weights[b]) continue;
-            const d0=cents[a][0]-cents[b][0], d1=cents[a][1]-cents[b][1], d2=cents[a][2]-cents[b][2];
-            if(Math.sqrt(d0*d0+d1*d1+d2*d2)<50){
-              const wa=weights[a], wb=weights[b], tw=wa+wb;
-              cents[a]=[(cents[a][0]*wa+cents[b][0]*wb)/tw,
-                        (cents[a][1]*wa+cents[b][1]*wb)/tw,
-                        (cents[a][2]*wa+cents[b][2]*wb)/tw];
-              weights[a]=tw; weights[b]=0;
-              mergedOnce=true; break;
-            }
-          }
-        }
-      }
+  const stats=[];
+  for(const b of idxs){
+    const share=cnt[b]/totalPx;
+    if(share<0.0002) continue;
+    const ratio=interior[b]/cnt[b];
+    stats.push({b:b, share:share, ratio:ratio,
+      m:[sr[b]/cnt[b], sg[b]/cnt[b], sb[b]/cnt[b]]});
+  }
+  const dist3=function(a,b){ return Math.abs(a[0]-b[0])+Math.abs(a[1]-b[1])+Math.abs(a[2]-b[2]); };
+  const interiorColors=stats.filter(s=>s.share>=0.002 && s.ratio>=0.55).sort((a,b)=>b.share-a.share);
+  let pal=[];
+  for(const s of interiorColors){
+    if(!pal.some(q=>dist3(q,s.m)<10)) pal.push(s.m);
+    if(pal.length>=n) break;
+  }
+  // 追加"薄但真实"的结构色（外框、细线、独立混色带）。
+  // 关键排除项：落在两个已选色连线上的颜色 = 抗锯齿渐变出来的中间色，必须留给覆盖率反解，
+  // 否则会凭空多出一层杂色（实测旗帜图上多出的 (206,34,38)/(183,52,60) 就是红白之间的渐变，
+  // 加进去反而让 >32 差异像素从 1.30% 涨到 2.27%）。
+  const segDist=function(P,A,B){          // 点到线段 AB 的垂直距离
+    const ax=B[0]-A[0], ay=B[1]-A[1], az=B[2]-A[2];
+    const a2=ax*ax+ay*ay+az*az;
+    if(a2<1) return dist3(P,A);
+    let t=((P[0]-A[0])*ax+(P[1]-A[1])*ay+(P[2]-A[2])*az)/a2;
+    t=Math.max(0,Math.min(1,t));
+    return Math.sqrt(Math.pow(P[0]-(A[0]+ax*t),2)+Math.pow(P[1]-(A[1]+ay*t),2)+Math.pow(P[2]-(A[2]+az*t),2));
+  };
+  const isBlend=function(c){
+    for(let i=0;i<pal.length;i++) for(let j=i+1;j<pal.length;j++){
+      if(segDist(c,pal[i],pal[j])<18) return true;   // 是两色的混合 → 不算独立颜色
     }
+    return false;
+  };
+  const extras=stats.filter(s=>s.share>=0.0025 && !(s.share>=0.002 && s.ratio>=0.55)).sort((a,b)=>b.share-a.share);
+  for(const s of extras){
+    if(pal.length>=n) break;
+    if(pal.some(q=>dist3(q,s.m)<30)) continue;
+    if(isBlend(s.m)) continue;
+    pal.push(s.m);
   }
-  // 先把面积极小的簇（<0.6%，噪点/压缩杂色）丢掉
-  const total=len/4;
-  let keep=[];
-  for(let k=0;k<n;k++){
-    if(weights && weights[k]>0 && weights[k]/total >= 0.006) keep.push(k);
+  pal=pal.map(c=>[Math.round(c[0]),Math.round(c[1]),Math.round(c[2])]);
+  if(pal.length<2){
+    const top=stats.slice().sort((a,b)=>b.share-a.share).slice(0,2);
+    pal=top.map(s=>[Math.round(s.m[0]),Math.round(s.m[1]),Math.round(s.m[2])]);
   }
-  // 再识别"抗锯齿过渡色"：面积小、且颜色正好落在两个更大主色的连线上（两色混合出来的边缘色）→ 并入
-  if(keep.length>2 && weights){
-    let changed=true;
-    while(changed && keep.length>2){
-      changed=false;
-      keep.sort((a,b)=>weights[a]-weights[b]);     // 从面积最小的开始判断
-      for(let i=0;i<keep.length && !changed;i++){
-        const s=keep[i];
-        if(weights[s]/total >= 0.03) continue;     // 面积够大，不视为过渡色
-        for(let x=1;x<keep.length && !changed;x++){
-          for(let y=x+1;y<keep.length && !changed;y++){
-            const A=cents[keep[x]], B=cents[keep[y]], S=cents[s];
-            const abx=B[0]-A[0], aby=B[1]-A[1], abz=B[2]-A[2];
-            const ab2=abx*abx+aby*aby+abz*abz;
-            if(ab2<400) continue;                  // 两个主色本身太接近，跳过
-            const t=((S[0]-A[0])*abx+(S[1]-A[1])*aby+(S[2]-A[2])*abz)/ab2;
-            if(t<0.05||t>0.95) continue;            // 不在两色中间段
-            const dd=Math.sqrt(Math.pow(S[0]-(A[0]+abx*t),2)+Math.pow(S[1]-(A[1]+aby*t),2)+Math.pow(S[2]-(A[2]+abz*t),2));
-            if(dd<26){ keep.splice(i,1); changed=true; }
-          }
-        }
-      }
-    }
-  }
-  // JPEG/扫描压缩噪声色并入：只在少色图（合并后 ≤4 色）时触发。
-  // 存在 ≥2 个面积 >5% 的大主色时，面积 <2% 的小色层并入最近大主色。
-  // 多色图（>4 色）不触发——小面积色可能是设计的一部分。
-  // 不依赖 top3 share（JPEG 把红色打散成几百种色会让 top3<50% 但图本身只有 2-3 色）。
-  if(keep.length>3 && keep.length<=4 && weights){
-    const bigColors=keep.filter(k=>weights[k]/total>=0.05);
-    if(bigColors.length>=2){
-      let changed=true;
-      while(changed && keep.length>2){
-        changed=false;
-        keep.sort((a,b)=>weights[a]-weights[b]);
-        for(let i=0;i<keep.length && !changed;i++){
-          const s=keep[i];
-          if(weights[s]/total>=0.02) continue;       // 面积>2% 保留
-          if(bigColors.indexOf(s)>=0) continue;       // 大主色保留
-          // 找最近的大色并入
-          let bestBig=-1, bestDist=Infinity;
-          for(const k of bigColors){
-            const dr=cents[s][0]-cents[k][0], dg=cents[s][1]-cents[k][1], db=cents[s][2]-cents[k][2];
-            const dist=Math.sqrt(dr*dr+dg*dg+db*db);
-            if(dist<bestDist){bestDist=dist;bestBig=k;}
-          }
-          if(bestBig>=0){keep.splice(i,1);changed=true;}
-        }
-      }
-    }
-  }
-  if(keep.length<2){
-    // 兜底：按权重取前 2 名
-    const order=Array.from({length:n},(_,k)=>k).sort((a,b)=>(weights?weights[b]-weights[a]:0));
-    keep=[order[0], order[1]];
-  }
-  const pal=keep.map(k=>[Math.round(cents[k][0]),Math.round(cents[k][1]),Math.round(cents[k][2])]);
   // 色箱 → 最近主色的查找表，避免逐像素做 N 次距离计算
   const lut=new Uint8Array(BINS);
-  // 边缘抗锯齿混色吸收：白底深蓝字之类的边缘混色（灰蓝）在感知空间落在两主色连线上，
-  // 而第三个主色（金色）可能离这条连线中段更近 → 最近邻会把边缘错分给金色，形成一圈杂色描边。
-  // 对"落在某两主色连线上的颜色"，直接归到两端中更近的一端。仅主色 ≤16 时启用（照片渐变不受影响）。
-  const PA=pal.length;
-  let segs=null;
-  if(PA>1 && PA<=16){
-    segs=[];
-    for(let i=0;i<PA;i++)for(let j=i+1;j<PA;j++){
-      const A=pal[i],B=pal[j];
-      const ax=B[0]-A[0],ay=B[1]-A[1],az=B[2]-A[2];
-      const a2=ax*ax+ay*ay+az*az;
-      if(a2>=400) segs.push([A[0],A[1],A[2],ax,ay,az,a2,i,j]);   // 两主色太接近的连线无意义
-    }
-  }
   for(let b=0;b<BINS;b++){
     const r=(((b>>10)&31)<<3)+4, g=(((b>>5)&31)<<3)+4, bl=((b&31)<<3)+4;
     let best=0, bd=Infinity;
-    for(let k=0;k<PA;k++){
+    for(let k=0;k<pal.length;k++){
       const dr=r-pal[k][0], dg=g-pal[k][1], db=bl-pal[k][2];
       const dist=dr*dr*0.299+dg*dg*0.587+db*db*0.114;
       if(dist<bd){bd=dist;best=k}
-    }
-    // 只检查"真实出现过的颜色"且明显不属于任何主色（bd 阈值≈欧氏 35px）
-    if(segs && cnt[b]>0 && bd>400){
-      let hitSeg=-1, hitPerp=48, hitT=0;
-      for(let s=0;s<segs.length;s++){
-        const sg=segs[s];
-        const vx=r-sg[0], vy=g-sg[1], vz=bl-sg[2];
-        const t=(vx*sg[3]+vy*sg[4]+vz*sg[5])/sg[6];
-        if(t<0.12||t>0.88) continue;                       // 靠近端点的本就归端点
-        const px=sg[0]+sg[3]*t, py=sg[1]+sg[4]*t, pz=sg[2]+sg[5]*t;
-        const dd=Math.sqrt((r-px)*(r-px)+(g-py)*(g-py)+(bl-pz)*(bl-pz));
-        if(dd<hitPerp){ hitPerp=dd; hitSeg=s; hitT=t; }
-      }
-      if(hitSeg>=0){
-        const sg=segs[hitSeg], i=sg[7], j=sg[8];
-        const dI=(r-pal[i][0])*(r-pal[i][0])*0.299+(g-pal[i][1])*(g-pal[i][1])*0.587+(bl-pal[i][2])*(bl-pal[i][2])*0.114;
-        const dJ=(r-pal[j][0])*(r-pal[j][0])*0.299+(g-pal[j][1])*(g-pal[j][1])*0.587+(bl-pal[j][2])*(bl-pal[j][2])*0.114;
-        best=(dI<=dJ)?i:j;
-        bd=0;
-      }
     }
     lut[b]=best;
   }
   // 全分辨率重映射（不做抖动，保证色块干净）
   for(let i=0;i<len;i+=4){
     const bi=((d[i]>>3)<<10)|((d[i+1]>>3)<<5)|(d[i+2]>>3);
-    const p=pal[lut[bi]];
-    d[i]=p[0]; d[i+1]=p[1]; d[i+2]=p[2];
+    const c=pal[lut[bi]];
+    d[i]=c[0]; d[i+1]=c[1]; d[i+2]=c[2];
   }
-  return {count:pal.length, palette:pal, merged:idxs.length-pal.length};
+  return {count:pal.length, palette:pal, merged:idxs.length-pal.length, uniqueBins};
 }
 
 function applyEnhancements(imageData, denoiseLevel, smoothRadius, sharpenAmount){
@@ -1378,13 +1320,20 @@ async function doConvert(){
       // 关闭无数据项的 Taubin 平滑与 trapping 描边（两者实测都会推离官方边界）。
       // 四档语义：越靠前越贴官方输出（节点更多），越靠后越省节点/更平滑。
       // 不传 blurIters：引擎按边界破碎度自适应，上限 2 级（原 6 级是负贡献）。
+      // 参数标定：以 ScreenShot_2026-10-24_173722_035（红底 + 白色新月五星）实测，
+      // 用官方 PDF 做参照跑栅格差异，逐项定了下面这组默认值：
+      //   · blurIters 必须显式给 0：自适应降噪会把 1–2px 的深色外框糊掉，
+      //     差异从 0.0096 恶化到 0.0153；
+      //   · level 0.44 比 0.5 更贴官方（MAE 0.0101→0.0096）；
+      //   · cornerThresh 0.8 保住星角，超过 1.3 星尖会被削圆。
       const vmOpts={
         smoothPasses:[0,0,8,20][lt]||0,
         prior:[0.60,0.60,0.50,0.40][lt]||0.60,
-        cornerThresh:[1.30,1.30,1.10,1.00][lt]||1.30,
-        bezierTol:[0.06,0.08,0.20,0.50][lt]||0.08,
+        cornerThresh:[0.80,0.90,1.00,1.20][lt]||0.80,
+        bezierTol:[0.10,0.15,0.25,0.50][lt]||0.10,
+        blurIters:[0,0,1,2][lt]||0,
         minArea:Math.max(2,(+$("minArea").value||1)*8),
-        level:0.5,           // 真实边界落在覆盖率 0.5 处，标定确认最优
+        level:[0.44,0.44,0.46,0.48][lt]||0.44,
         trapStroke:0,        // 0.5px 描边会让每层边界膨胀，实测增大差异
         labelData:imgData,   // 量化器已处理过的离散分割结果（含过渡色吸收）
       };
@@ -1418,15 +1367,58 @@ async function doConvert(){
 }
 convertBtn.addEventListener("click",doConvert);
 
-// ============ DOWNLOAD ============
+// ============ DOWNLOAD（多格式导出，对齐 Vector Magic 1.15 的导出面）============
+const EXPORT_LABEL={svg:"SVG",eps:"EPS",ai:"AI",pdf:"PDF",emf:"EMF",dxf:"DXF"};
+function exportSettings(){
+  return {
+    strokeBoundaries:!!($("exportStroke")&&$("exportStroke").checked),
+    groupByColor:!!($("exportGroup")&&$("exportGroup").checked),
+    stack:($("exportStack")&&$("exportStack").value)||"original",
+    dxfSplines:!!($("exportSpline")&&$("exportSpline").checked),
+    strokeWidth:0.5,
+  };
+}
+function refreshExportLabel(){
+  const f=($("exportFormat")&&$("exportFormat").value)||"svg";
+  const txt="导出 "+EXPORT_LABEL[f];
+  // 只替换文字节点，保留图标
+  let done=false;
+  downloadBtn.childNodes.forEach(n=>{
+    if(n.nodeType===3&&/导出\s*(SVG|EPS|AI|PDF|EMF|DXF)/.test(n.nodeValue)){n.nodeValue=txt;done=true}
+  });
+  if(!done) downloadBtn.appendChild(document.createTextNode(txt));
+  if($("exportSpline")) $("exportSpline").disabled=(f!=="dxf");
+  if($("exportStroke")) $("exportStroke").title = (f==="dxf")
+    ? "DXF 里描边会额外生成一层线宽路径（CAD 一般不需要）"
+    : "给每个形状加同色描边，消除相邻色块之间的亚像素细缝";
+}
+$("exportFormat")&&$("exportFormat").addEventListener("change",refreshExportLabel);
+$("exportStack")&&$("exportStack").addEventListener("change",()=>{});
+refreshExportLabel();
+
 downloadBtn.addEventListener("click",()=>{
-  if(!currentSvgStr)return;
-  const b=new Blob([currentSvgStr],{type:"image/svg+xml"});
-  const u=URL.createObjectURL(b);
+  const fmt=($("exportFormat")&&$("exportFormat").value)||"svg";
+  const svgEl=svgPreview.querySelector("svg");
+  if(!svgEl){ setStatus("还没有矢量结果，先点转换","error"); return; }
+  if(!window.VMExport){ setStatus("导出模块未加载（vendor/vm-export.js）","error"); return; }
+  const base=currentFile?currentFile.name.replace(/\.[^.]+$/,""):"output";
+  const opt=Object.assign({format:fmt,title:base},exportSettings());
+  let r;
+  try{ r=window.VMExport.build(svgEl,opt); }
+  catch(err){ setStatus(`导出失败：${err.message}`,"error"); return; }
+  const blob=r.bytes?new Blob([r.bytes],{type:r.mime}):new Blob([r.text],{type:r.mime});
+  const u=URL.createObjectURL(blob);
   const a=document.createElement("a");
-  a.download=`${currentFile?currentFile.name.replace(/\.[^.]+$/,""):"output"}-矢量图.svg`;
-  a.href=u;a.click();URL.revokeObjectURL(u);
-  setStatus("SVG 已下载","success");
+  a.download=`${base}-矢量图.${r.ext}`;
+  a.href=u;
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(u),5000);
+  const kb=(blob.size/1024).toFixed(1);
+  let detail=`${r.shapes||0} 个图形 · ${kb} KB`;
+  if(fmt==="dxf") detail+=r.splines?` · ${r.splines} 条样条`:` · ${r.lines} 段折线`;
+  if(opt.strokeBoundaries) detail+=" · 已描边";
+  if(opt.groupByColor) detail+=" · 按颜色分组";
+  setStatus(`${EXPORT_LABEL[fmt]} 已导出：${detail}`,"success");
 });
 
 // ============ CMYK EXPORT ============
